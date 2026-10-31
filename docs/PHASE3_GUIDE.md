@@ -21,6 +21,8 @@ Les minuteurs Cloudflare réveillent les deux objets indépendamment. Seules les
 
 Le lancement du test passe par `start --test --confirm test-20261031-24h` après le contrôle `preflight --test`. Il n’est jamais relancé pour remettre son capital à zéro.
 
+Premier passage au conseil vérifié : réunion de contrôle ouverte vers 21 h 44, amendement du montant, cinq votes et achat fictif de 40,28 € sur le nul LA Galaxy–Austin à 21 h 45. Les treize analyses initialement bloquées ont repris ; aucun dossier n’était encore en erreur technique lors de cette vérification. La sauvegarde GitHub contrôlée contient `council.json.gz` (officiel READY, journal vide) et `test24h.json.gz` (test RUNNING, journal propre au test).
+
 Lancement effectivement enregistré : **31 octobre 2026 à 21 h 36 min 47 s, heure de Paris**. Fin des nouvelles mises le 1er novembre à 15 h 36 min 47 s ; fin du test le 1er novembre à 21 h 36 min 47 s. Le fonds officiel est resté READY, sans crédit ni appel IA supplémentaire lors de ce lancement.
 
 La préparation a corrigé les pages Gamma trop volumineuses (pagination adaptative) et la présélection football sans source couverte. Le premier cycle réel a ensuite révélé une limite propre à Cloudflare SQLite : les motifs LIKE/GLOB sont limités à 50 octets ([limites officielles](https://developers.cloudflare.com/durable-objects/platform/limits/)). Les identifiants longs des analyses empêchaient tout appel Azure. La recherche utilise maintenant des identifiants exacts et la mémoire utilise `instr` ; un test reproduit cette limite. Les treize échecs initiaux restent dans les journaux, les analyses sont reprises avec de nouveaux carnets, et le compteur du test n’a pas été réinitialisé.
