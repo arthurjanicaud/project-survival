@@ -85,6 +85,14 @@ export class Engine {
       await this.analyze(job.payload.id);await this.slot('rehearsal:'+job.payload.id,'EXTRAORDINARY',job.payload.id);
     }
     else if(job.kind==='ANALYZE')await this.analyze(job.payload.id);
+    else if(job.kind==='ANALYZE_RETRY'){
+      const s=this.repo.state()!,d=this.repo.dossier(job.payload.id);
+      if(s.status==='RUNNING'&&Date.now()<Date.parse(s.betting_deadline!)&&d?.status==='TECHNICAL_ERROR'){
+        this.repo.putMarket(await this.markets.inspect(d.market_id));
+        d.payload.recovered_error=d.payload.error;delete d.payload.error;d.status='PENDING';this.repo.putDossier(d);
+        await this.analyze(d.id);
+      }
+    }
     else if(job.kind==='SLOT')await this.slot(job.payload.slot,job.payload.kind==='TEST'&&this.repo.state()?.mode==='test'?'TEST':'ORDINARY');
     else if(job.kind==='EMERGENCY')await this.slot(job.payload.slot,'EXTRAORDINARY',job.payload.id);
     else if(job.kind==='MEETING')await this.advance(job.payload.id);

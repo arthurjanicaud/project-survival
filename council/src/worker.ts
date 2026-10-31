@@ -49,6 +49,13 @@ export class Council extends DurableObject<Env>{
         const s=await this.engine.start();await this.arm();return json(s);
       }
       if(path==='/admin/tick'&&r.method==='POST'){this.engine.tick();await this.arm();return json({ok:true});}
+      if(path==='/admin/retry-analyses'&&r.method==='POST'){
+        if(this.repo.state()?.mode!=='test'||this.repo.state()?.status!=='RUNNING')throw Error('RUNNING_TEST_REQUIRED');
+        const failed=this.repo.rows("SELECT id FROM dossiers WHERE status='TECHNICAL_ERROR' ORDER BY updated_at LIMIT 20"),at=now();
+        for(const d of failed)this.repo.enqueue('analysis-recovery:'+at+':'+d.id,'ANALYZE_RETRY',{id:d.id});
+        this.repo.event('analysis-recovery:'+at,'RECOVERY',`${failed.length} analyses techniques seront reprises avec des carnets actualisés. Les incidents précédents restent dans le journal.`);
+        await this.arm();return json({queued:failed.length});
+      }
       if(path==='/admin/export')return json(this.repo.export());
       if(path==='/admin/validation-packet'){
         const m=await this.engine.markets.inspect(u.searchParams.get('market_id')||'');this.repo.putMarket(m);

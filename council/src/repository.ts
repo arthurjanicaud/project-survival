@@ -49,9 +49,9 @@ export class Repository {
   retrieve(query:string,limit=3):Source[]{
     const terms=query.toLowerCase().split(/[^\p{L}\p{N}]+/u).filter(s=>s.length>=3).slice(0,6);
     if(!terms.length)return [];
-    const where=terms.map(()=>'(lower(title) LIKE ? OR lower(text) LIKE ?)').join(' OR ');
-    const documents=this.rows(`SELECT * FROM documents WHERE status='VERIFIED' AND id NOT LIKE 'book:%' AND (${where}) ORDER BY fetched_at DESC LIMIT ?`,...terms.flatMap(t=>[`%${t}%`,`%${t}%`]),limit);
-    const history=this.rows(`SELECT * FROM events WHERE kind IN ('SPEECH','LESSON','SETTLEMENT','DECISION','ARBITRATION','MEETING_END') AND (${terms.map(()=>'(lower(text) LIKE ? OR lower(details) LIKE ?)').join(' OR ')}) ORDER BY seq DESC LIMIT ?`,...terms.flatMap(t=>[`%${t}%`,`%${t}%`]),limit);
+    const where=terms.map(()=>'(instr(lower(title),?)>0 OR instr(lower(text),?)>0)').join(' OR ');
+    const documents=this.rows(`SELECT * FROM documents WHERE status='VERIFIED' AND id NOT LIKE 'book:%' AND (${where}) ORDER BY fetched_at DESC LIMIT ?`,...terms.flatMap(t=>[t,t]),limit);
+    const history=this.rows(`SELECT * FROM events WHERE kind IN ('SPEECH','LESSON','SETTLEMENT','DECISION','ARBITRATION','MEETING_END') AND (${terms.map(()=>'(instr(lower(text),?)>0 OR instr(lower(details),?)>0)').join(' OR ')}) ORDER BY seq DESC LIMIT ?`,...terms.flatMap(t=>[t,t]),limit);
     const past=history.map(e=>({id:'memory:'+e.seq,url:'https://project-survival.pages.dev/?phase=3'+(this.state()?.mode==='test'?'&experiment=test':'')+'&meeting='+encodeURIComponent(e.meeting_id||''),title:`Archive ${e.at} — ${e.actor} — ${e.kind}`,text:e.text+'\n'+e.details,fetched_at:e.at,provider:'Council archive',status:'VERIFIED' as const}));
     for(const d of past)this.document(d);
     return [...past.slice(0,1),...documents,...past.slice(1)].slice(0,limit);

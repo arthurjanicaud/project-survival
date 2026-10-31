@@ -47,7 +47,10 @@ Le secrétaire peut fournir des documents via document_requests : demande une re
 Au vote, POUR/CONTRE doit être une position réfléchie. ABSTAIN n'est jamais le défaut : explique le blocage essentiel et ce qui permettrait de te prononcer. Un désaccord est AGAINST. Une erreur technique est une absence, pas une abstention.
 Phase de travail : ${phase}. Respecte exactement le schéma de réponse. Les montants de proposal.amount sont en unités de cotation ; le taux EUR est fourni. Le vote porte sur l'identifiant ET la version. Tu peux changer d'avis après un débat ; n'imite pas les autres.`;
     let repair='';
-    const prior=this.repo.rows('SELECT * FROM calls WHERE id LIKE ? ORDER BY created_at',id+':attempt:%');
+    // Durable Object SQLite limits LIKE patterns to 50 bytes. Analysis keys
+    // include a SHA-256 fingerprint, so use indexed exact keys, not a pattern.
+    const attemptKeys=Array.from({length:CONFIG.azureAttempts*2},(_,i)=>`${id}:attempt:${i+1}`);
+    const prior=this.repo.rows(`SELECT * FROM calls WHERE id IN (${attemptKeys.map(()=>'?').join(',')}) ORDER BY created_at`,...attemptKeys);
     const recover=prior.length>=CONFIG.azureAttempts&&prior.length<CONFIG.azureAttempts*2&&prior.every(c=>c.status==='UNKNOWN'||/HTTP_(429|5\d\d)|AZURE_(TIMEOUT|NETWORK)/.test(c.error||''))&&Date.now()-Date.parse(prior[prior.length-1].created_at)>=30000;
     const first=recover?prior.length+1:1,last=recover?Math.min(prior.length+CONFIG.azureAttempts,CONFIG.azureAttempts*2):CONFIG.azureAttempts;
     for(let attempt=first;attempt<=last;attempt++){

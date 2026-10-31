@@ -59,7 +59,7 @@ Une réunion sans dossier produit un bilan déterministe, distinct d’un débat
 
 ## Marchés et données
 
-Le backend recherche et classe les marchés, conformément au cadrage de cette phase. Les agents ne font pas de recherche libre du catalogue. La collecte parcourt jusqu’à 120 événements par tag et par scan, puis sélectionne trois événements distincts par domaine selon liquidité, échéance, nouveauté et disponibilité prévisible des sources. Cette couverture est bornée et ne représente pas tout Polymarket.
+Le backend recherche et classe les marchés, conformément au cadrage de cette phase. Les agents ne font pas de recherche libre du catalogue. La collecte parcourt jusqu’à 120 événements par tag et par scan, avec un budget partagé de 24 pages et réduction automatique de leur taille si le fournisseur renvoie un lot trop volumineux, puis sélectionne trois événements distincts par domaine selon liquidité, échéance, nouveauté et disponibilité prévisible des sources. Cette couverture est bornée et ne représente pas tout Polymarket.
 
 Les endpoints publics Gamma, CLOB et Data correspondent au SDK unifié Python conservé dans le projet. La collecte edge utilise leurs API REST documentées. Les versions v1/v2, les identifiants d’outcomes et les noms réels des équipes sont conservés. Les frais proviennent de chaque marché ; leur absence de configuration bloque l’exécution.
 
@@ -216,7 +216,7 @@ La démonstration `?phase=3&mode=demo` est un replay statique **explicitement id
 
 ## Preuves et limites de validation
 
-- 47 tests Node du conseil réussis à ce stade, dont 100 cas de parité Python Decimal dans un test de corpus.
+- 51 tests Node du conseil réussis à ce stade, dont 100 cas de parité Python Decimal dans un test de corpus.
 - 132 tests Python réussis localement ; quatre intégrations opt-in non exécutées localement. Le précédent contrôle GitHub avec PostgreSQL a réussi.
 - Azure : déploiement `gpt-6.1-sol-3` vérifié, puis 12 appels de répétition réussis.
 - Cinq domaines : marchés et sources externes vérifiés depuis le système déployé (contrôle du 30 octobre 2026 à 00:12 UTC : cinq domaines disponibles, Azure disponible). Les variantes d’un même match sont regroupées et les abréviations d’équipes ne sont rapprochées que dans leur championnat identifié.
