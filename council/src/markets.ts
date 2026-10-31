@@ -16,7 +16,7 @@ export function nameMatches(name:any,text:string){
 export async function hash(value:unknown){return [...new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(JSON.stringify(value))))].map(v=>v.toString(16).padStart(2,'0')).join('');}
 export function coveragePreference(m:Market){
   const s=m.url+' '+m.resolution_source;
-  return (m.category==='basketball'&&/\/nba-|nba\.com/.test(s)?20:0)+(m.category==='esport'&&/dota/i.test(m.question)?15:0)+(m.category==='tennis'&&/itftennis|challenger|sioux.falls/i.test(s+' '+m.question)?-15:0)+(/player-props|handicap|first-set|game[1-9]|1h-|2h-/.test(s)?-8:0)+Math.log10(Math.max(1,Number(m.liquidity)));
+  return (m.category==='basketball'&&/\/nba-|nba\.com/.test(s)?20:0)+(m.category==='football'&&/\/(epl|lal|bund|bun|lig1|ita|mls|ucl|bra)-/.test(s)?20:0)+(m.category==='football'&&/\bvs\.?\s/i.test(m.question)?4:0)+(m.category==='esport'&&/dota/i.test(m.question)?15:0)+(m.category==='tennis'&&/itftennis|challenger|sioux.falls/i.test(s+' '+m.question)?-15:0)+(/player-props|handicap|first-set|game[1-9]|1h-|2h-/.test(s)?-8:0)+Math.log10(Math.max(1,Number(m.liquidity)));
 }
 export function classify(raw:any):Category|null{
   const s=[raw.question,raw.category,raw.sportsMarketType,...(raw.tags||[]).map((t:any)=>t.slug||t.label),...(raw.events||[]).flatMap((e:any)=>[e.title,e.slug,...(e.tags||[]).map((t:any)=>t.slug||t.label)])].join(' ').toLowerCase();
@@ -116,7 +116,7 @@ export class Markets {
       try{
         const r=await this.transport(url,{signal:c.signal,redirect:'manual',headers:{Accept:'application/json','User-Agent':'ProjectSurvival/3.0 (https://project-survival.pages.dev)'}});
         if(!r.ok){await r.body?.cancel();const retry=r.headers.get('retry-after'),parsed=Number(retry),wait=retry&&Number.isNaN(parsed)?Math.max(1,(Date.parse(retry)-Date.now())/1000):Math.max(1,Number.isFinite(parsed)?parsed:1);if(r.status===429)this.repo.set('provider_cooldown:'+u.hostname,{until:new Date(Date.now()+wait*1000).toISOString()});if((r.status===429||r.status>=500)&&a===0&&wait<=5){await new Promise(q=>setTimeout(q,(wait+.2)*1000));continue;}throw Error('PROVIDER_HTTP_'+r.status);}
-        if(Number(r.headers.get('content-length')||0)>8_000_000)throw Error('PROVIDER_RESPONSE_TOO_LARGE');
+        if(Number(r.headers.get('content-length')||0)>8_000_000){await r.body?.cancel();throw Error('PROVIDER_RESPONSE_TOO_LARGE');}
         const text=await r.text();if(text.length>8_000_000)throw Error('PROVIDER_RESPONSE_TOO_LARGE');
         const data=JSON.parse(text);if(cacheSeconds)this.repo.putCache(url,data,cacheSeconds);return data;
       }finally{clearTimeout(timer);}
@@ -126,14 +126,17 @@ export class Markets {
   async catalog(category:Category,deadline:string):Promise<any[]>{
     const slugs:Record<Category,string[]>={weather:['weather','temperature'],football:['soccer'],basketball:['nba','basketball'],tennis:['tennis'],esport:['esports']};
     const ids=[];for(const slug of slugs[category]){try{const tag=await this.get(`${GAMMA}/tags/slug/${slug}`,86400);if(tag.id)ids.push(tag.id);}catch{/* Alternate tag or general discovery below. */}}
-    const all:Record<string,any>={};
-    for(const tag of ids.length?ids:[null]){
-      for(let page=0;page<12;page++){
+    const all:Record<string,any>={};let requests=0;
+    for(const tag of ids.length?[...new Set(ids)]:[null]){
+      let offset=0,pageSize=10;
+      while(offset<120&&requests<24){
         const discoveryEnd=category==='weather'?deadline:new Date(Date.parse(deadline)+7*86400000).toISOString();
-        const url=new URL(GAMMA+'/events');Object.entries({active:'true',closed:'false',limit:'10',offset:String(page*10),order:'endDate',ascending:'true',end_date_min:now(),end_date_max:discoveryEnd,...(tag?{tag_id:String(tag)}:{})}).forEach(([k,v])=>url.searchParams.set(k,v));
-        const res=await this.get(url.href),events=Array.isArray(res)?res:res.data||[];
+        const url=new URL(GAMMA+'/events');Object.entries({active:'true',closed:'false',limit:String(pageSize),offset:String(offset),order:'endDate',ascending:'true',end_date_min:now(),end_date_max:discoveryEnd,...(tag?{tag_id:String(tag)}:{})}).forEach(([k,v])=>url.searchParams.set(k,v));
+        let res:any;requests++;
+        try{res=await this.get(url.href);}catch(e){if((e as Error).message==='PROVIDER_RESPONSE_TOO_LARGE'&&pageSize>1){pageSize=Math.max(1,Math.floor(pageSize/2));continue;}throw e;}
+        const events=Array.isArray(res)?res:res.data||[];
         for(const event of events)for(const m of event.markets||[]){const raw={...m,events:[event],tags:[...(event.tags||[]),...(m.tags||[])]};if(classify(raw)===category)all[String(m.id)]=raw;}
-        if(events.length<10)break;
+        offset+=events.length;if(events.length<pageSize)break;
       }
     }
     return Object.values(all);
