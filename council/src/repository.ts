@@ -47,12 +47,12 @@ export class Repository {
   }
   document(s:Source){this.run('INSERT OR IGNORE INTO documents VALUES(?,?,?,?,?,?,?)',s.id,s.url,s.title,s.text.slice(0,CONFIG.documentChars),s.fetched_at,s.provider,s.status);}
   retrieve(query:string,limit=3):Source[]{
-    const terms=query.toLowerCase().split(/\W+/).filter(s=>s.length>=3).slice(0,6);
+    const terms=query.toLowerCase().split(/[^\p{L}\p{N}]+/u).filter(s=>s.length>=3).slice(0,6);
     if(!terms.length)return [];
     const where=terms.map(()=>'(lower(title) LIKE ? OR lower(text) LIKE ?)').join(' OR ');
     const documents=this.rows(`SELECT * FROM documents WHERE status='VERIFIED' AND id NOT LIKE 'book:%' AND (${where}) ORDER BY fetched_at DESC LIMIT ?`,...terms.flatMap(t=>[`%${t}%`,`%${t}%`]),limit);
     const history=this.rows(`SELECT * FROM events WHERE kind IN ('SPEECH','LESSON','SETTLEMENT','DECISION','ARBITRATION','MEETING_END') AND (${terms.map(()=>'(lower(text) LIKE ? OR lower(details) LIKE ?)').join(' OR ')}) ORDER BY seq DESC LIMIT ?`,...terms.flatMap(t=>[`%${t}%`,`%${t}%`]),limit);
-    const past=history.map(e=>({id:'memory:'+e.seq,url:'https://project-survival.pages.dev/?phase=3&meeting='+encodeURIComponent(e.meeting_id||''),title:`Archive ${e.at} — ${e.actor} — ${e.kind}`,text:e.text+'\n'+e.details,fetched_at:e.at,provider:'Council archive',status:'VERIFIED' as const}));
+    const past=history.map(e=>({id:'memory:'+e.seq,url:'https://project-survival.pages.dev/?phase=3'+(this.state()?.mode==='test'?'&experiment=test':'')+'&meeting='+encodeURIComponent(e.meeting_id||''),title:`Archive ${e.at} — ${e.actor} — ${e.kind}`,text:e.text+'\n'+e.details,fetched_at:e.at,provider:'Council archive',status:'VERIFIED' as const}));
     for(const d of past)this.document(d);
     return [...past.slice(0,1),...documents,...past.slice(1)].slice(0,limit);
   }
@@ -109,7 +109,7 @@ export class Repository {
     this.event(current.id+':lesson','LESSON',`Retour factuel sur « ${payload.question} » : résultat net ${payload.profit} unités. Probabilité OUI annoncée : ${prob===null?'inconnue':prob}. Score de Brier : ${payload.brier_score??'non calculable'}. Une issue favorable ne suffit pas à prouver une bonne prévision.`,'SECRETARY',payload.proposal.meeting_id,{category:payload.category,estimated_yes_probability:prob,result:m.payouts,brier_score:payload.brier_score,expected_edge_at_purchase:payload.expected_edge_per_share,ex_ante_review:payload.ex_ante_review});
     return true;
   });}
-  notify(id:string,title:string,message:string,url:string,priority=3){this.run("INSERT OR IGNORE INTO notifications VALUES(?,?,'PENDING',0,?,NULL)",id,now(),JSON.stringify({title,message,url,priority}));this.enqueue('notify:'+id,'NOTIFY',{id});}
+  notify(id:string,title:string,message:string,url:string,priority=3){if(this.state()?.mode==='test'){title='[TEST 24H] '+title;const link=new URL(url);link.searchParams.set('experiment','test');url=link.href;}this.run("INSERT OR IGNORE INTO notifications VALUES(?,?,'PENDING',0,?,NULL)",id,now(),JSON.stringify({title,message,url,priority}));this.enqueue('notify:'+id,'NOTIFY',{id});}
   cache<T=any>(key:string):T|null{const r=this.one('SELECT payload FROM transient_cache WHERE key=? AND expires_at>?',key,now());return r?JSON.parse(r.payload):null;}
   putCache(key:string,payload:any,seconds=3600){this.run('INSERT INTO transient_cache VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET expires_at=excluded.expires_at,payload=excluded.payload',key,new Date(Date.now()+seconds*1000).toISOString(),JSON.stringify(payload));}
   prune(){this.run('DELETE FROM transient_cache WHERE expires_at<?',now());/* Financial, document and meeting evidence is never pruned. */}

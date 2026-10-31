@@ -3,6 +3,7 @@ import {Repository} from './repository';
 import {Engine} from './engine';
 import {CONFIG,now,type Env} from './domain';
 import {D} from './finance';
+import {boardTarget} from './routing';
 
 const json=(v:unknown,status=200)=>Response.json(v,{status,headers:{'Cache-Control':'no-store'}});
 async function authorized(r:Request,env:Env){
@@ -24,7 +25,7 @@ export class Council extends DurableObject<Env>{
   async fetch(r:Request){
     const u=new URL(r.url),path=u.pathname;
     const objectId=r.headers.get('x-board-id')||this.env.EXPERIMENT_ID;
-    this.engine.prepare(objectId.startsWith('recovery-')?(this.repo.state()?.id||objectId):objectId,r.headers.get('x-board-mode')==='validation'?'validation':'live');
+    this.engine.prepare(objectId.startsWith('recovery-')?(this.repo.state()?.id||objectId):objectId,r.headers.get('x-board-mode')==='test'?'test':r.headers.get('x-board-mode')==='validation'?'validation':'live');
     try{
       if(this.repo.get('recovery_readonly')&&r.method!=='GET')return json({error:'RECOVERY_IS_READ_ONLY'},403);
       if(path==='/api/ws'){
@@ -154,13 +155,28 @@ export default {
     if(r.method==='OPTIONS')return new Response(null,{headers:cors(r,env)});
     if(admin&&!await authorized(r,env))return json({error:'UNAUTHORIZED'},401);
     if(!admin&&!u.pathname.startsWith('/api/'))return json({error:'NOT_FOUND'},404);
-    const instance=admin?u.searchParams.get('instance'):null;
-    if(instance&&!/^(validation|recovery)-[a-zA-Z0-9-]{1,60}$/.test(instance))return json({error:'INVALID_INSTANCE'},400);
-    const id=instance||env.EXPERIMENT_ID,headers=new Headers(r.headers);headers.set('x-board-id',id);headers.set('x-board-mode',instance?'validation':'live');
-    const stub=env.COUNCIL.get(env.COUNCIL.idFromName(id));const response=await stub.fetch(new Request(r,{headers}));
+    let target;try{target=boardTarget(u,admin,env);}catch(e){return json({error:(e as Error).message},400);}
+    const headers=new Headers(r.headers);headers.set('x-board-id',target.id);headers.set('x-board-mode',target.mode);
+    const mirror=admin&&u.pathname==='/admin/research'&&target.id===env.EXPERIMENT_ID&&env.TEST_EXPERIMENT_ID?r.clone():null;
+    const stub=env.COUNCIL.get(env.COUNCIL.idFromName(target.id));let response=await stub.fetch(new Request(r,{headers}));
     if(response.status===101)return response;
+    if(response.ok&&mirror){
+      // Share only public research. Financial state, model calls and memories
+      // remain in separate Durable Objects with separate journals.
+      const h=new Headers(headers);h.set('x-board-id',env.TEST_EXPERIMENT_ID!);h.set('x-board-mode','test');
+      const shared=await env.COUNCIL.get(env.COUNCIL.idFromName(env.TEST_EXPERIMENT_ID!)).fetch(new Request(mirror,{headers:h}));
+      if(!shared.ok)return json({error:'TEST_RESEARCH_DELIVERY_FAILED'},502);await shared.body?.cancel();
+    }
+    if(response.ok&&admin&&u.pathname==='/admin/notification-outbox'&&target.id===env.EXPERIMENT_ID&&env.TEST_EXPERIMENT_ID){
+      const body:any=await response.json(),h=new Headers(headers);h.set('x-board-id',env.TEST_EXPERIMENT_ID);h.set('x-board-mode','test');
+      const extra=await env.COUNCIL.get(env.COUNCIL.idFromName(env.TEST_EXPERIMENT_ID)).fetch(new Request(r.url,{headers:h}));
+      if(extra.ok){const b:any=await extra.json();body.notifications.push(...b.notifications.map((n:any)=>({...n,instance:env.TEST_EXPERIMENT_ID})));}
+      response=json(body);
+    }
     const out=new Response(response.body,response);for(const [k,v]of Object.entries(cors(r,env)))out.headers.set(k,v);return out;
   },
-  async scheduled(_c:ScheduledController,env:Env,ctx:ExecutionContext){ctx.waitUntil(env.COUNCIL.get(env.COUNCIL.idFromName(env.EXPERIMENT_ID)).fetch(new Request('https://internal/tick',{headers:{'x-board-id':env.EXPERIMENT_ID}})));},
+  async scheduled(_c:ScheduledController,env:Env,ctx:ExecutionContext){
+    for(const id of [env.EXPERIMENT_ID,env.TEST_EXPERIMENT_ID].filter(Boolean) as string[])ctx.waitUntil(env.COUNCIL.get(env.COUNCIL.idFromName(id)).fetch(new Request('https://internal/tick',{headers:{'x-board-id':id,'x-board-mode':id===env.TEST_EXPERIMENT_ID?'test':'live'}})));
+  },
 } satisfies ExportedHandler<Env>;
 function cors(r:Request,env:Env):Record<string,string>{const origin=r.headers.get('Origin');return origin&&(origin===env.PUBLIC_ORIGIN||/^http:\/\/(localhost|127\.0\.0\.1):5173$/.test(origin))?{'Access-Control-Allow-Origin':origin,'Access-Control-Allow-Methods':'GET,OPTIONS','Vary':'Origin'}:{};}

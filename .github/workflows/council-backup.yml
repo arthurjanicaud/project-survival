@@ -19,9 +19,11 @@ jobs:
           python-version: '3.12'
       - run: pip install httpx python-dotenv
       - run: python operations/council_admin.py export --output exports/phase3/council.json
+      - run: python operations/council_admin.py export --test --output exports/phase3/test24h.json
       - run: gzip -9 exports/phase3/council.json
+      - run: gzip -9 exports/phase3/test24h.json
       - uses: actions/upload-artifact@v4
         with:
           name: council-backup-${{ github.run_id }}
-          path: exports/phase3/council.json.gz
+          path: exports/phase3/*.json.gz
           retention-days: 7

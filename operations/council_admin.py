@@ -46,6 +46,7 @@ def main():
     p = argparse.ArgumentParser()
     p.add_argument('command', choices=['deploy','health','state','preflight','notify-test','export','start','tick','rehearse','restore'])
     p.add_argument('--instance')
+    p.add_argument('--test',action='store_true',help='Select the separately configured 24-hour test')
     p.add_argument('--confirm')
     p.add_argument('--output')
     p.add_argument('--market')
@@ -55,6 +56,8 @@ def main():
         deploy();return
     c = configuration()
     path = {'health':'/api/health','state':'/api/state','preflight':'/admin/preflight','notify-test':'/admin/notifications/test','export':'/admin/export','start':'/admin/start','tick':'/admin/tick','rehearse':'/admin/rehearsal','restore':'/admin/restore'}[a.command]
+    if a.instance and a.test:
+        raise RuntimeError('Choose --test or --instance, not both')
     if a.instance and not path.startswith('/admin/'):
         raise RuntimeError('Use admin export to inspect an isolated instance')
     method = 'GET' if a.command in ['health','state','export'] else 'POST'
@@ -69,7 +72,8 @@ def main():
         data={'backup':json.loads(Path(a.input).read_text(encoding='utf-8')),'confirm_id':a.confirm}
     if a.command=='start' and not a.confirm:
         raise RuntimeError('Explicit --confirm experiment-id is required')
-    r = httpx.request(method, c['COUNCIL_API_URL']+path, headers={'Authorization':'Bearer '+c['COUNCIL_ADMIN_TOKEN']}, params={'instance':a.instance} if a.instance else {}, json=data if method=='POST' else None, timeout=180)
+    params={'experiment':'test'} if a.test else {'instance':a.instance} if a.instance else {}
+    r = httpx.request(method, c['COUNCIL_API_URL']+path, headers={'Authorization':'Bearer '+c['COUNCIL_ADMIN_TOKEN']}, params=params, json=data if method=='POST' else None, timeout=180)
     r.raise_for_status()
     if a.output:
         target=Path(a.output);target.parent.mkdir(parents=True,exist_ok=True);target.write_text(json.dumps(r.json(),ensure_ascii=False,indent=2),encoding='utf-8');print(f'Saved: {target}')

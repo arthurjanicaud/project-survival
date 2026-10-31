@@ -31,13 +31,18 @@ def compact_espn(d):
             names=[t.get('team',t.get('athlete',{})).get('displayName','') for t in x['competitors']]
             events.append({'id':e.get('id'),'name':' vs '.join(names) or e.get('name'),'date':c.get('date',e.get('date')),'status':c.get('status',e.get('status')),'competitions':[x],'links':e.get('links',[])})
     return {'events':events,'collector_method':'ESPN public scoreboard, compacted without invented values'}
-def research():
+def research(force=False):
     cfg=configuration();api=cfg['COUNCIL_API_URL'];headers={'Authorization':'Bearer '+cfg['COUNCIL_ADMIN_TOKEN']}
     health=httpx.get(api+'/api/health',timeout=30).json()
-    if health['state']['status'] in ['FINISHED','CLOSING']:
+    test_response=httpx.get(api+'/api/health',params={'experiment':'test'},timeout=30)
+    runs=[health]+([test_response.json()] if test_response.is_success else [])
+    active=[r for r in runs if r['state']['status'] not in ['FINISHED','CLOSING']]
+    if not active:
         print(json.dumps({'research':'inactive_experiment'}));return
-    previous=health.get('research_collector',{} ) or {}
-    if previous.get('at') and (datetime.now(timezone.utc)-datetime.fromisoformat(previous['at'].replace('Z','+00:00'))).total_seconds()<1500:
+    def recent(run):
+        previous=run.get('research_collector',{}) or {}
+        return previous.get('at') and (datetime.now(timezone.utc)-datetime.fromisoformat(previous['at'].replace('Z','+00:00'))).total_seconds()<1500
+    if not force and all(recent(run) for run in active):
         print(json.dumps({'research':'recent_shared_feed_reused'}));return
     leagues=['basketball/nba','basketball/wnba','soccer/eng.1','soccer/esp.1','soccer/ger.1','soccer/fra.1','soccer/ita.1','soccer/bra.1','soccer/usa.1','soccer/uefa.champions','tennis/atp','tennis/wta']
     urls=['https://api.opendota.com/api/teams']
@@ -67,8 +72,8 @@ def notifications():
         out=client.get(api+'/admin/notification-outbox',headers=headers);out.raise_for_status();b=out.json();sent=0
         for n in b['notifications']:
             r=client.post('https://ntfy.sh',json={'topic':b['topic'],'title':n['title'],'message':n['message'],'priority':n['priority'],'click':n['url']})
-            r.raise_for_status();ack=client.post(api+'/admin/notification-ack',headers=headers,json={'id':n['id']});ack.raise_for_status();sent+=1
+            r.raise_for_status();ack=client.post(api+'/admin/notification-ack',headers=headers,params={'instance':n['instance']} if n.get('instance') else {},json={'id':n['id']});ack.raise_for_status();sent+=1
             time.sleep(.3)
         print(json.dumps({'notifications_sent':sent}))
 if __name__=='__main__':
-    p=argparse.ArgumentParser();p.add_argument('command',choices=['research','notifications']);a=p.parse_args();globals()[a.command]()
+    p=argparse.ArgumentParser();p.add_argument('command',choices=['research','notifications']);p.add_argument('--force',action='store_true');a=p.parse_args();research(force=a.force) if a.command=='research' else notifications()

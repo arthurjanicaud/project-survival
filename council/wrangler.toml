@@ -5,6 +5,7 @@ workers_dev = true
 
 [vars]
 EXPERIMENT_ID = "survival-003"
+TEST_EXPERIMENT_ID = "test-20261031-24h"
 AZURE_DEPLOYMENT = "gpt-6.1-sol-3"
 PUBLIC_ORIGIN = "https://project-survival.pages.dev"
 ALLOW_FIXTURES = "false"

@@ -6,6 +6,21 @@ Un fonds commun de **1 000 € fictifs**, cinq spécialistes, quatre membres per
 
 Le déploiement ne lance pas le défi. **Seul START crée les 168 heures.** Aucun wallet ni chemin d’ordre réel n’existe dans le moteur opérationnel.
 
+## Test autonome de 24 heures, hors compétition officielle
+
+Le test autorisé le 31 octobre 2026 utilise le Durable Object séparé `test-20261031-24h`, avec 1 000 € fictifs, une mémoire propre, ses appels Azure et un journal indépendant. Son dashboard est `?phase=3&experiment=test`. Il utilise les données publiques et le vrai déploiement Azure ; ce n’est pas le replay `mode=demo`. Les notifications portent `[TEST 24H]` et ouvrent le dashboard de test.
+
+Le START du test fixe exactement 24 heures. La marge de règlement reste de six heures : seuls les événements prévus avant cette échéance sont admissibles et les nouvelles mises cessent alors. Une réunion de contrôle est prévue huit minutes après le lancement, si des dossiers sont proposés, puis les horaires habituels s’appliquent. Une absence de proposition produit un bilan, jamais un pari forcé. Après les 24 heures, plus de décisions ; les règlements retardés restent explicitement en attente jusqu’à confirmation officielle, puis le rapport est sauvegardé automatiquement.
+
+Les minuteurs Cloudflare réveillent les deux objets indépendamment. Seules les sources publiques sont mutualisées ; les écritures financières et les souvenirs ne le sont pas. Le collecteur et le relais téléphonique desservent aussi le test et les sauvegardes quotidiennes incluent les deux fonds. L’expérience officielle reste `READY` jusqu’à son propre START.
+
+```powershell
+.venv/Scripts/python.exe operations/council_admin.py state --test
+.venv/Scripts/python.exe operations/council_admin.py export --test --output exports/test24h/council.json
+```
+
+Le lancement du test passe par `start --test --confirm test-20261031-24h` après le contrôle `preflight --test`. Il n’est jamais relancé pour remettre son capital à zéro.
+
 ## Organisation
 
 | Membre | Fonction |

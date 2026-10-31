@@ -15,7 +15,8 @@ export class Engine {
     if((this.markets.synthetic||this.azure.synthetic)&&mode!=='demo')throw Error('SYNTHETIC_DATA_FORBIDDEN');
     const old=this.repo.state();if(old){if(old.id!==id)throw Error('EXPERIMENT_ID_MISMATCH');return old;}
     const s:State={id,mode,status:'READY',started_at:null,end_at:null,betting_deadline:null,fx:null,initial_eur:CONFIG.initialEur,created_at:now(),updated_at:now(),last_scan:null,last_cycle:null,emergency_day:'',emergency_count:0,last_emergency:null,last_error:null};
-    this.repo.save(s);this.repo.set('policy',CONFIG);return s;
+    s.duration_hours=mode==='test'?24:CONFIG.durationHours;
+    this.repo.save(s);this.repo.set('policy',{...CONFIG,durationHours:s.duration_hours});return s;
   }
   async start(){
     const s=this.repo.state()!;if(s.status!=='READY')throw Error('START_IS_NEVER_A_RESET');
@@ -26,10 +27,15 @@ export class Engine {
     }
     this.repo.atomic(()=>{
       if(this.repo.state()!.status!=='READY')throw Error('START_IS_NEVER_A_RESET');
-      s.started_at=now();s.end_at=new Date(Date.now()+CONFIG.durationHours*3600000).toISOString();s.betting_deadline=new Date(Date.parse(s.end_at)-CONFIG.settlementBufferHours*3600000).toISOString();s.fx=fx;s.status='RUNNING';
+      s.started_at=now();s.end_at=new Date(Date.now()+(s.duration_hours||CONFIG.durationHours)*3600000).toISOString();s.betting_deadline=new Date(Date.parse(s.end_at)-CONFIG.settlementBufferHours*3600000).toISOString();s.fx=fx;s.status='RUNNING';
       this.repo.run('INSERT INTO ledger VALUES(?,?,?,?,?)',s.id+':initial',now(),'INITIAL',D(s.initial_eur).mul(fx.usd_per_eur).toFixed(),s.id);
-      this.repo.save(s);this.repo.event(s.id+':start','START','Le défi de sept jours commence. Fonds commun : 1 000 € fictifs.');
+      this.repo.save(s);this.repo.event(s.id+':start','START',s.mode==='test'?'Le test technique de 24 heures commence. Fonds indépendant : 1 000 € fictifs. La phase 3 officielle reste intacte.':'Le défi de sept jours commence. Fonds commun : 1 000 € fictifs.');
       for(const slot of nextSlots(s.started_at,s.end_at,40))this.repo.enqueue('slot:'+slot,'SLOT',{slot},slot);
+      if(s.mode==='test'){
+        const opening=new Date(Date.now()+8*60000).toISOString();
+        this.repo.enqueue(s.id+':opening','SLOT',{slot:opening,kind:'TEST'},opening);
+        this.repo.notify(s.id+':started','Test technique lancé',`24 heures, fin prévue ${s.end_at}. Première réunion de contrôle dans environ 8 minutes si un dossier est proposé.`,this.link(''));
+      }
       this.tick();
     });return s;
   }
@@ -79,7 +85,7 @@ export class Engine {
       await this.analyze(job.payload.id);await this.slot('rehearsal:'+job.payload.id,'EXTRAORDINARY',job.payload.id);
     }
     else if(job.kind==='ANALYZE')await this.analyze(job.payload.id);
-    else if(job.kind==='SLOT')await this.slot(job.payload.slot,'ORDINARY');
+    else if(job.kind==='SLOT')await this.slot(job.payload.slot,job.payload.kind==='TEST'&&this.repo.state()?.mode==='test'?'TEST':'ORDINARY');
     else if(job.kind==='EMERGENCY')await this.slot(job.payload.slot,'EXTRAORDINARY',job.payload.id);
     else if(job.kind==='MEETING')await this.advance(job.payload.id);
     else if(job.kind==='SETTLE')await this.settlements();
@@ -184,14 +190,14 @@ export class Engine {
     const s=this.repo.state()!;if(s.status!=='RUNNING')return;
     const id='meeting:'+slot;if(this.repo.meeting(id))return;
     if(this.repo.one("SELECT id FROM meetings WHERE status IN ('RUNNING','PAUSED')")){
-      if(kind==='ORDINARY'&&Date.now()-Date.parse(slot)<300000)throw new ProviderError('MEETING_BUSY');
+      if(['ORDINARY','TEST'].includes(kind)&&Date.now()-Date.parse(slot)<300000)throw new ProviderError('MEETING_BUSY');
       this.repo.event(id+':missed','SLOT_MISSED','Créneau reporté : une réunion précédente est encore active.','SECRETARY',null,{slot,kind});return;
     }
     const list=(onlyId?[this.repo.dossier(onlyId)]:this.repo.rows("SELECT * FROM dossiers WHERE status='PROPOSED' ORDER BY priority DESC").map(r=>({...r,payload:JSON.parse(r.payload)}))).filter(d=>d?.status==='PROPOSED');
     const agenda:any[]=[];const used=new Set();
     for(const d of list){const m=this.repo.market(d.market_id);if(!m?.active||Date.parse(m.event_end_at)<=Date.now()||Date.parse(m.event_end_at)>Date.parse(s.betting_deadline!))continue;if(used.has(d.category)&&list.some(x=>!used.has(x.category)))continue;agenda.push(d);used.add(d.category);if(agenda.length>=CONFIG.maxAgenda)break;}
     if(!agenda.length){
-      if(kind==='ORDINARY'&&Date.now()-Date.parse(slot)<240000&&this.repo.one("SELECT id FROM jobs WHERE kind='ANALYZE' AND status IN ('PENDING','RUNNING') LIMIT 1"))throw new ProviderError('MEETING_PENDING_DOSSIERS');
+      if(['ORDINARY','TEST'].includes(kind)&&Date.now()-Date.parse(slot)<240000&&this.repo.one("SELECT id FROM jobs WHERE kind='ANALYZE' AND status IN ('PENDING','RUNNING') LIMIT 1"))throw new ProviderError('MEETING_PENDING_DOSSIERS');
       const reasons=this.repo.rows('SELECT category,status,count(*) AS count FROM dossiers GROUP BY category,status');
       const late=Date.now()>=Date.parse(s.betting_deadline!);
       this.repo.putMeeting({id,slot,kind,status:'NO_AGENDA',stage:'DONE',created_at:now(),started_at:null,finished_at:now(),payload:{reasons,summary:late?'La fenêtre de nouveaux paris est fermée. Le suivi des règlements continue.':'Aucune proposition exploitable disponible. Les attentes et erreurs restent distinctes ; les recherches continuent.',next_research:CATEGORIES}});
@@ -407,7 +413,7 @@ export class Engine {
     const meetings=this.repo.rows('SELECT * FROM meetings ORDER BY created_at DESC LIMIT 50').map(m=>({...m,payload:JSON.parse(m.payload)}));
     const committed=positions.filter(p=>p.status==='PENDING').reduce((n,p)=>n.plus(p.cost),D(0));
     const profit=positions.filter(p=>p.status==='SETTLED').reduce((n,p)=>n.plus(p.payload.profit),D(0));
-    return {state:s,config:CONFIG,members:MEMBERS,cash_quote:cash,cash_eur:D(cash).div(fx).toFixed(),committed_eur:committed.div(fx).toFixed(),profit_eur:profit.div(fx).toFixed(),positions,
+    return {state:s,config:{...CONFIG,durationHours:s.duration_hours||CONFIG.durationHours},members:MEMBERS,cash_quote:cash,cash_eur:D(cash).div(fx).toFixed(),committed_eur:committed.div(fx).toFixed(),profit_eur:profit.div(fx).toFixed(),positions,
       meetings,next_slots:s.started_at?nextSlots(now(),s.end_at,4):[],dossiers:this.repo.rows('SELECT id,market_id,category,status,priority,updated_at,payload FROM dossiers ORDER BY updated_at DESC LIMIT 80').map(d=>({...d,payload:JSON.parse(d.payload),market:preview(this.repo.market(d.market_id))})),
       counterfactuals:this.repo.rows('SELECT * FROM counterfactuals ORDER BY rowid DESC LIMIT 80').map(c=>({...c,payload:JSON.parse(c.payload)})),
       infrastructure:{azure:{...azure,circuit:this.repo.get('azure_circuit')},
@@ -415,7 +421,7 @@ export class Engine {
         preflight:this.repo.get('preflight'),notification_delivery:this.env.NTFY_DELIVERY||'direct',notification_relay:this.repo.get('notification_relay'),pending_notifications:this.repo.one("SELECT count(*) n FROM notifications WHERE status='PENDING'")?.n||0,last_notification_sent:this.repo.one("SELECT max(json_extract(payload,'$.sent_at')) at FROM notifications WHERE status='SENT'")?.at||null,research_collector:this.repo.get('research_collector'),settlement_status:this.repo.get('settlement_status'),provider_errors:this.repo.rows("SELECT key,value FROM meta WHERE key LIKE 'provider_error:%'").map(r=>({provider:r.key.split(':')[1],...JSON.parse(r.value)})),scans:Object.fromEntries(CATEGORIES.map(c=>[c,this.repo.get('scan:'+c)])),health:this.repo.get('health'),quota:this.repo.get('quota'),
         jobs:this.repo.rows('SELECT kind,status,count(*) AS count FROM jobs GROUP BY kind,status')},last_event_seq:events,report:this.repo.get('final_report')};
   }
-  link(id:string){return this.env.PUBLIC_ORIGIN+'/?phase=3&meeting='+encodeURIComponent(id);}
+  link(id:string){return this.env.PUBLIC_ORIGIN+'/?phase=3'+(this.repo.state()?.mode==='test'?'&experiment=test':'')+(id?'&meeting='+encodeURIComponent(id):'');}
   errorCode(e:unknown){return e instanceof ProviderError?e.code:e instanceof Error?e.message.slice(0,150):'TECHNICAL_ERROR';}
 }
 function preview(m:Market|null){return m?{...m,description:m.description.slice(0,600),books:Object.fromEntries(Object.entries(m.books).map(([side,b])=>[side,b?{...b,asks:b.asks.slice(0,1),bids:b.bids.slice(0,1)}:null]))}:null;}
