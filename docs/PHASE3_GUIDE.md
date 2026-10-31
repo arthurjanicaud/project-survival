@@ -21,6 +21,10 @@ Les minuteurs Cloudflare réveillent les deux objets indépendamment. Seules les
 
 Le lancement du test passe par `start --test --confirm test-20261031-24h` après le contrôle `preflight --test`. Il n’est jamais relancé pour remettre son capital à zéro.
 
+Lancement effectivement enregistré : **31 octobre 2026 à 21 h 36 min 47 s, heure de Paris**. Fin des nouvelles mises le 1er novembre à 15 h 36 min 47 s ; fin du test le 1er novembre à 21 h 36 min 47 s. Le fonds officiel est resté READY, sans crédit ni appel IA supplémentaire lors de ce lancement.
+
+La préparation a corrigé les pages Gamma trop volumineuses (pagination adaptative) et la présélection football sans source couverte. Le premier cycle réel a ensuite révélé une limite propre à Cloudflare SQLite : les motifs LIKE/GLOB sont limités à 50 octets ([limites officielles](https://developers.cloudflare.com/durable-objects/platform/limits/)). Les identifiants longs des analyses empêchaient tout appel Azure. La recherche utilise maintenant des identifiants exacts et la mémoire utilise `instr` ; un test reproduit cette limite. Les treize échecs initiaux restent dans les journaux, les analyses sont reprises avec de nouveaux carnets, et le compteur du test n’a pas été réinitialisé.
+
 ## Organisation
 
 | Membre | Fonction |
@@ -216,7 +220,7 @@ La démonstration `?phase=3&mode=demo` est un replay statique **explicitement id
 
 ## Preuves et limites de validation
 
-- 51 tests Node du conseil réussis à ce stade, dont 100 cas de parité Python Decimal dans un test de corpus.
+- 52 tests Node du conseil réussis à ce stade, dont 100 cas de parité Python Decimal dans un test de corpus.
 - 132 tests Python réussis localement ; quatre intégrations opt-in non exécutées localement. Le précédent contrôle GitHub avec PostgreSQL a réussi.
 - Azure : déploiement `gpt-6.1-sol-3` vérifié, puis 12 appels de répétition réussis.
 - Cinq domaines : marchés et sources externes vérifiés depuis le système déployé (contrôle du 30 octobre 2026 à 00:12 UTC : cinq domaines disponibles, Azure disponible). Les variantes d’un même match sont regroupées et les abréviations d’équipes ne sont rapprochées que dans leur championnat identifié.
