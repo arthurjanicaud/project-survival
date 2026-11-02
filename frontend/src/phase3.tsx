@@ -34,10 +34,10 @@ export function PhaseThree(){
     (async()=>{await refresh();if(!closed){connect();replay();}})();const timer=setInterval(()=>{if(document.visibilityState==='visible'){refresh();replay();}},60000);
     return()=>{closed=true;clearInterval(timer);if(refreshTimer.current)clearTimeout(refreshTimer.current);if(reconnect.current)clearTimeout(reconnect.current);socket?.close();};
   },[]);
-  useEffect(()=>{if(!meeting)return;get('/api/meeting?id='+encodeURIComponent(meeting)).then(r=>{setReplayEvents(r.events);if(r.meeting)setArchives(old=>old.some(m=>m.id===r.meeting.id)?old:[...old,r.meeting]);}).catch(()=>setError('Le replay demandé est momentanément indisponible.'));},[meeting]);
   const members=state?.members||[],meetings=[...new Map([...(state?.meetings||[]),...archives].map((m:any)=>[m.id,m])).values()],active=meetings.find((m:any)=>['RUNNING','PAUSED'].includes(m.status));
   const chosen=meeting||active?.id||meetings.find((m:any)=>m.status!=='NO_AGENDA')?.id;
-  const conversation=[...new Map([...(meeting?replayEvents:[]),...events.filter(e=>e.meeting_id===chosen)].filter(e=>e.meeting_id===chosen&&!['THINKING','SCAN'].includes(e.kind)).map(e=>[e.seq,e])).values()].sort((a,b)=>a.seq-b.seq);
+  useEffect(()=>{if(!chosen)return;let cancelled=false;get('/api/meeting?id='+encodeURIComponent(chosen)).then(r=>{if(cancelled)return;setReplayEvents(r.events);if(r.meeting)setArchives(old=>old.some(m=>m.id===r.meeting.id)?old:[...old,r.meeting]);}).catch(()=>{if(!cancelled)setError('Le replay demandé est momentanément indisponible.');});return()=>{cancelled=true;};},[chosen]);
+  const conversation=[...new Map([...replayEvents,...events.filter(e=>e.meeting_id===chosen)].filter(e=>e.meeting_id===chosen&&!['THINKING','SCAN'].includes(e.kind)).map(e=>[e.seq,e])).values()].sort((a,b)=>a.seq-b.seq);
   const boardLive=!!active&&chosen===active.id&&!DEMO;
   const selectedMeeting=meetings.find((m:any)=>m.id===chosen),focusId=selectedMeeting?.payload.agenda?.[Math.min(selectedMeeting?.payload.index||0,(selectedMeeting?.payload.agenda?.length||1)-1)];
   const focus=state?.dossiers.find((d:any)=>d.id===focusId),participants=focus?new Set([focus.category.toUpperCase(),'QUANT','RISK','CONTRA','CHAIR']):null;
