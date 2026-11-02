@@ -3,7 +3,7 @@ import {CONFIG,type Market,type Source} from './domain';
 export type Review={market_id:string;at:string;facts:string;price:string|null;status:string;lesson_seq?:number};
 // Transport timestamps and cache refreshes are not new evidence.
 export function factualText(text:string):string{
-  try{const clean=(v:any):any=>Array.isArray(v)?v.map(clean):v&&typeof v==='object'?Object.fromEntries(Object.entries(v).filter(([k])=>!['updated','updated_at','fetched_at','generated_at','lastUpdated','last_update_timestamp'].includes(k)).map(([k,x])=>[k,clean(x)])):v;return JSON.stringify(clean(JSON.parse(text)));}catch{return text;}
+  try{const clean=(v:any):any=>Array.isArray(v)?v.map(clean):v&&typeof v==='object'?Object.fromEntries(Object.entries(v).filter(([k])=>!['updated','updated_at','fetched_at','generated_at','lastUpdated','last_update_timestamp','display_clock','displayClock','clock','generationtime_ms'].includes(k)).map(([k,x])=>[k,clean(x)])):v;return JSON.stringify(clean(JSON.parse(text)));}catch{return text;}
 }
 export function needsReview(old:Review|null,facts:string,price:string|null,at=Date.now(),lessonSeq=0){
   if(!old)return true;

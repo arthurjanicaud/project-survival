@@ -54,9 +54,9 @@ Le Risk Manager ne dispose pas d’un veto discrétionnaire. Le backend contrôl
 
 - Collecte Polymarket toutes les dix minutes.
 - Réunions à **9 h, 13 h, 17 h et 21 h, heure de Paris**, avec gestion du changement d’heure.
-- Analyse réutilisée pendant deux heures, sauf mouvement significatif d’environ quatre points de prix. Les marchés déjà investis sont exclus.
+- Analyse réutilisée tant que les faits, les prix exécutables et les retours de résultats ne changent pas significativement. Délai anti-répétition de quinze minutes ; reprise technique après cinq minutes. Les marchés déjà investis sont exclus.
 - Jusqu’à trois dossiers par réunion, sélection diversifiée par domaine ; pas de remplissage artificiel.
-- Réunions extraordinaires : urgence avant la prochaine session, priorité suffisante, regroupement, délai de 45 minutes et quatre convocations maximum par jour par défaut. Ces paramètres anti-abus sont modifiables dans `council/src/domain.ts`.
+- Réunions extraordinaires : échéance avant la prochaine session détectée par le calendrier, même si le spécialiste omet le drapeau urgent ; regroupement pendant 45 secondes, délai anti-doublon de cinq minutes sauf échéance imminente, aucun plafond quotidien. Ces paramètres anti-abus sont modifiables dans `council/src/domain.ts`.
 - Réunion limitée à dix minutes, sans durée minimale ou attente théâtrale. La répétition vérifiée a duré **38 secondes** : les appels indépendants sont parallèles.
 
 Les alarmes et l’état des réunions sont stockés dans Cloudflare. Le PC et le dashboard peuvent être fermés. Le navigateur ne pilote jamais le moteur. Les baux sont renouvelés pendant les tâches ; une interruption permet une reprise après environ deux minutes, sans répéter un débit.
@@ -65,11 +65,11 @@ Une réunion sans dossier produit un bilan déterministe, distinct d’un débat
 
 ## Marchés et données
 
-Le backend recherche et classe les marchés, conformément au cadrage de cette phase. Les agents ne font pas de recherche libre du catalogue. La collecte parcourt jusqu’à 120 événements par tag et par scan, avec un budget partagé de 24 pages et réduction automatique de leur taille si le fournisseur renvoie un lot trop volumineux, puis sélectionne trois événements distincts par domaine selon liquidité, échéance, nouveauté et disponibilité prévisible des sources. Cette couverture est bornée et ne représente pas tout Polymarket.
+Le backend recherche et classe les marchés, conformément au cadrage de cette phase. Les agents ne parcourent pas librement tout le catalogue : le spécialiste choisit parmi les variantes cotées préparées pour chaque événement, avec leurs règles, carnets et frais. La collecte parcourt jusqu’à 120 événements par tag et par scan, avec un budget partagé de 24 pages et réduction automatique de leur taille si le fournisseur renvoie un lot trop volumineux, puis sélectionne trois événements distincts par domaine selon liquidité, échéance, nouveauté et disponibilité prévisible des sources. Cette couverture est bornée et ne représente pas tout Polymarket.
 
 Les endpoints publics Gamma, CLOB et Data correspondent au SDK unifié Python conservé dans le projet. La collecte edge utilise leurs API REST documentées. Les versions v1/v2, les identifiants d’outcomes et les noms réels des équipes sont conservés. Les frais proviennent de chaque marché ; leur absence de configuration bloque l’exécution.
 
-Les données externes sont mutualisées : Open-Meteo/NWS, ESPN et OpenDota. ESPN refuse certains accès Cloudflare et OpenDota limite les IP partagées : le collecteur Python GitHub récupère leurs données publiques et transmet un cache horodaté au conseil. **Cloudflare déclenche aussi ce collecteur lorsque les données ont plus de 25 minutes** ; le cron GitHub reste un secours. Aucun proxy de contournement géographique ni API payante n’est utilisé.
+Les données externes sont mutualisées : Open-Meteo/NWS, ESPN et OpenDota. ESPN refuse certains accès Cloudflare et OpenDota limite les IP partagées : le collecteur Python GitHub récupère leurs données publiques et transmet un cache horodaté au conseil. **Cloudflare déclenche aussi ce collecteur lorsque les données ont plus de dix minutes** ; le cron GitHub reste un secours. Aucun proxy de contournement géographique ni API payante n’est utilisé.
 
 Le cache de recherche expire après une heure. Une source absente n’est jamais remplacée par une information inventée. Les grilles météo restent identifiées comme des prévisions près d’une station, pas comme son observation finale. La station mentionnée dans les règles est privilégiée lorsqu’elle est reconnue. La couverture des villes et compétitions est limitée aux adaptateurs disponibles ; certaines informations, notamment blessures, compositions et patchs, peuvent manquer.
 
@@ -222,8 +222,8 @@ La démonstration `?phase=3&mode=demo` est un replay statique **explicitement id
 
 ## Preuves et limites de validation
 
-- 52 tests Node du conseil réussis à ce stade, dont 100 cas de parité Python Decimal dans un test de corpus.
-- 132 tests Python réussis localement ; quatre intégrations opt-in non exécutées localement. Le précédent contrôle GitHub avec PostgreSQL a réussi.
+- 66 tests Node du conseil réussis au contrôle du 2 novembre, dont 100 cas de parité Python Decimal dans un test de corpus.
+- Les résultats détaillés des tests du 2 novembre figurent dans `docs/PHASE3_CORRECTIONS.md` ; quatre intégrations Python restent opt-in localement. Le précédent contrôle GitHub avec PostgreSQL a réussi.
 - Azure : déploiement `gpt-6.1-sol-3` vérifié, puis 12 appels de répétition réussis.
 - Cinq domaines : marchés et sources externes vérifiés depuis le système déployé (contrôle du 30 octobre 2026 à 00:12 UTC : cinq domaines disponibles, Azure disponible). Les variantes d’un même match sont regroupées et les abréviations d’équipes ne sont rapprochées que dans leur championnat identifié.
 - Répétition NBA réelle : cinq votes POUR, achat fictif de 84,999 unités au prix limite de 0,29, frais 0, portefeuille de validation uniquement.
@@ -234,3 +234,7 @@ La démonstration `?phase=3&mode=demo` est un replay statique **explicitement id
 - Stockage de préparation : environ 17 Mo dans le Durable Object. Les artefacts GitHub existants représentent environ 381 Mo ; leur rétention reste limitée à sept jours pour les nouvelles sauvegardes. Aucune donnée phase 3 n’est écrite dans Supabase.
 
 Les contrôles et délais mesurés ne garantissent ni disponibilité à 100 %, ni profit, ni nombre minimal d’investissements. L’interprétation sémantique d’un modèle peut être erronée malgré un JSON valide ; le débat et les citations réduisent ce risque sans le supprimer. Le journal garde aussi les incidents de préparation et les corrections, plutôt que de les effacer.
+
+## Corrections après le test de 24 heures
+
+Voir [PHASE3_CORRECTIONS.md](PHASE3_CORRECTIONS.md) : clôture officielle corrigée, réutilisation des analyses, choix des variantes, convocations urgentes et retours d’expérience factuels. Le test est terminé ; la phase officielle reste READY, sans date de départ.

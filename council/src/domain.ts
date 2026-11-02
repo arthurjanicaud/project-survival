@@ -24,7 +24,7 @@ export const CONFIG = {
   settlementBatch:12, counterfactualBatch:10,researchRefreshMinutes:10,
   fetchTimeoutMs:15000, azureTimeoutMs:75000, azureAttempts:2, maxContextChars:26000,
   maxOutputTokens:1800, maxBookAgeSeconds:180, documentChars:9000,
-  transientCacheHours:12, quotaWarningBytes:250_000_000, version:'survival-phase3-v2',
+  transientCacheHours:12, quotaWarningBytes:250_000_000, version:'survival-phase3-v2.1',
 };
 export type Env = {
   COUNCIL:DurableObjectNamespace; EXPERIMENT_ID:string; TEST_EXPERIMENT_ID?:string; AZURE_DEPLOYMENT:string;
@@ -33,13 +33,14 @@ export type Env = {
 };
 export type Book = {asset_id:string; observed_at:string;exchange_at?:string; bids:{price:string;size:string}[]; asks:{price:string;size:string}[]; minimum:string;tick:string;fee_rate:string;fee_exponent:string;evidence:string};
 export type Source = {id:string;url:string;title:string;text:string;fetched_at:string;status:'VERIFIED'|'UNAVAILABLE';provider:string};
-export type Market = {id:string;question:string;event_title?:string;description:string;category:Category;url:string;group:string;version:'v1'|'v2';condition_id:string|null;question_id:string|null;assets:{YES:string;NO:string};outcome_labels?:{YES:string;NO:string};start_at:string|null;end_at:string;event_end_at:string;resolution_source:string;active:boolean;resolved:boolean;payouts:{YES:string;NO:string}|null;resolution_evidence:Record<string,unknown>|null;liquidity:string;volume:string;books:Partial<Record<'YES'|'NO',Book>>;delay_seconds:number;observed_at:string;tags:string[]};
+export type Market = {id:string;question:string;event_title?:string;fixture_context?:string;description:string;category:Category;url:string;group:string;version:'v1'|'v2';condition_id:string|null;question_id:string|null;assets:{YES:string;NO:string};outcome_labels?:{YES:string;NO:string};start_at:string|null;end_at:string;event_end_at:string;resolution_source:string;active:boolean;resolved:boolean;payouts:{YES:string;NO:string}|null;resolution_evidence:Record<string,unknown>|null;liquidity:string;volume:string;books:Partial<Record<'YES'|'NO',Book>>;delay_seconds:number;observed_at:string;tags:string[]};
 export type Proposal = {id:string;meeting_id:string;market_id:string;version:number;side:'YES'|'NO';amount:string;max_price:string;status:string;reason:string;created_at:string;estimated_yes_probability?:number|null};
 export type State = {id:string;mode:'live'|'demo'|'validation'|'test';duration_hours?:number;status:'READY'|'RUNNING'|'CLOSING'|'FINISHED';started_at:string|null;end_at:string|null;betting_deadline:string|null;fx:{usd_per_eur:string;reference_date:string;source:string;method:string}|null;initial_eur:string;created_at:string;updated_at:string;last_scan:string|null;last_cycle:string|null;emergency_day:string;emergency_count:number;last_emergency:string|null;last_error:string|null};
 export const decimalString=z.string().regex(/^\d+(?:\.\d+)?$/).max(28);
 const nullableDecimal=decimalString.nullable();
 const citation=z.object({source_id:z.string().max(100),quote:z.string().min(12).max(240)}).strict();
 export const AnalysisSchema=z.object({
+  market_id:z.string().max(120).nullable(),
   speech:z.string().min(30).max(1800), recommendation:z.enum(['PROPOSE','WAIT']),
   estimated_yes_probability:z.number().min(0).max(1).nullable(), confidence:z.number().min(0).max(1),
   side:z.enum(['YES','NO']).nullable(), amount:nullableDecimal,max_price:nullableDecimal,

@@ -81,6 +81,7 @@ export class Engine {
   }
   async process(job:any){
     if(job.kind==='SCAN')await this.scan(job.payload.category);
+    else if(job.kind==='PREPARE_FIXTURE')await this.prepareFixture(job.payload);
     else if(job.kind==='PREFLIGHT_CATEGORY')await this.preflightCategory(job.payload.category);
     else if(job.kind==='NOTIFY')await this.notifications(job.payload.id);
     else if(job.kind==='NOTIFY_RELAY')await this.dispatchNotifications();
@@ -129,26 +130,48 @@ export class Engine {
       return {...(items.find(x=>x.m.id===memo?.market_id)||items[0]),memo,related:items.slice(0,4).map(x=>({id:x.m.id,question:x.m.question}))};
     }).sort((a,b)=>(b.priority+(b.memo?Math.min(60,(Date.now()-Date.parse(b.memo.checked_at||b.memo.at))/60000)-20:60))-(a.priority+(a.memo?Math.min(60,(Date.now()-Date.parse(a.memo.checked_at||a.memo.at))/60000)-20:60)));
     let prepared=0,reused=0,unsupported=0;const failures:string[]=[];
-    const lessonSeq=this.repo.one("SELECT max(seq) n FROM events WHERE kind='LESSON' AND json_extract(details,'$.category')=? AND (json_extract(details,'$.result') IS NOT NULL OR json_extract(details,'$.counterfactual_id') IS NOT NULL)",category)?.n||0;
-    for(const {m,priority,previous:old,memo,related} of selected.slice(0,3)){try{
-      if(old?.status==='PENDING')continue;
-      this.repo.putMarket(m);const full=await this.markets.inspect(m.id);this.repo.putMarket(full);
-      const sources=await this.markets.evidence(full),external=independentFacts(sources);
-      const facts=await hash(external.map(x=>({provider:x.provider,text:factualText(x.text)})).sort((a,b)=>a.provider.localeCompare(b.provider)));
-      const price=full.books.YES?.asks[0]?.price||null;
-      const comparable=memo&&memo.market_id!==full.id?{...memo,price:null}:memo||null;
-      if(!needsReview(comparable,facts,price,Date.now(),lessonSeq)){reused++;this.repo.set('fixture_review:'+category+':'+full.group,{...memo,checked_at:now()});continue;}
-      const payload={source_ids:sources.filter(x=>x.status==='VERIFIED').map(x=>x.id),source_failures:sources.filter(x=>x.status!=='VERIFIED').map(x=>x.provider),reference_price:price,previous_analysis:old?.payload.analysis||null,analyzed_at:old?.payload.analyzed_at||null,fact_hash:facts,event_group:full.group,related_markets:related,lesson_seq:lessonSeq};
-      if(!external.length||sourceFreshness(full,sources).in_play&&!sourceFreshness(full,sources).fresh){unsupported++;this.repo.putDossier({id:full.id,market_id:full.id,category,status:'RESEARCH_PENDING',priority,hash:facts,payload:{...payload,data_reason:'Aucune source indépendante exploitable : le collecteur recherche les données, sans appel IA inutile.'}});this.repo.set('fixture_review:'+category+':'+full.group,{market_id:full.id,at:now(),facts,price,status:'RESEARCH_PENDING',lesson_seq:lessonSeq});continue;}
-      const revision=await hash({market:full.id,facts,price,lessonSeq});
-      this.repo.putDossier({id:full.id,market_id:full.id,category,status:'PENDING',priority,hash:revision,payload});
-      this.repo.set('fixture_review:'+category+':'+full.group,{market_id:full.id,at:now(),facts,price,status:'PENDING',lesson_seq:lessonSeq});
-      this.repo.enqueue('analysis:'+full.id+':'+revision,'ANALYZE',{id:full.id});prepared++;
-    }catch(e){failures.push(this.errorCode(e));}}
+    const bucket=Math.floor(Date.now()/600000);
+    for(const item of selected.slice(0,3)){
+      const ids=[item.m.id,...item.related.map((m:any)=>m.id)].filter((id:string,i:number,all:string[])=>all.indexOf(id)===i).slice(0,4);
+      this.repo.enqueue(`prepare:${category}:${item.m.group}:${bucket}`,'PREPARE_FIXTURE',{category,group:item.m.group,ids,priority:item.priority,bucket});
+    }
     this.repo.set('scan:'+category,{at:now(),discovered:raw.length,eligible,prepared,reused,unsupported,fixtures:groups.size,exclusions,errors:failures});
     s.last_scan=now();this.repo.save(s);
-    this.repo.event(`scan:${category}:${Math.floor(Date.now()/600000)}`,'SCAN',`${category} : ${raw.length} marchés, ${groups.size} événements distincts, ${prepared} analyses nécessaires, ${reused} dossiers réutilisés, ${unsupported} en attente de données.`,'SECRETARY',null,{category,exclusions,errors:failures});
+    this.repo.event(`scan:${category}:${Math.floor(Date.now()/600000)}`,'SCAN',`${category} : ${raw.length} marchés, ${groups.size} événements distincts, ${Math.min(3,selected.length)} événements à vérifier avant tout nouvel appel IA.`,'SECRETARY',null,{category,exclusions,errors:failures});
     if(selected.slice(0,3).length&&failures.length===selected.slice(0,3).length)throw Error('MARKET_BOOK_PROVIDER_UNAVAILABLE');
+  }
+  async prepareFixture(job:any){
+    const s=this.repo.state()!;if(s.status!=='RUNNING'||Date.now()>=Date.parse(s.betting_deadline!))return;
+    const {category,group,ids,priority,bucket}=job;
+    const reviewKey='fixture_review:'+category+':'+group,memo=this.repo.get<any>(reviewKey),markets:Market[]=[];
+    if(memo&&this.repo.dossier(memo.market_id)?.status==='PENDING')return;
+    for(const id of ids){
+      if(this.repo.one('SELECT id FROM positions WHERE market_id=?',id)||this.repo.dossier(id)?.status==='IN_MEETING')continue;
+      try{const m=await this.markets.inspect(id);if(m.group!==group||!m.active||Date.parse(m.event_end_at)<=Date.now()||Date.parse(m.event_end_at)>Date.parse(s.betting_deadline!))continue;
+        this.repo.putMarket(m);markets.push(m);
+      }catch(error){this.repo.event('prepare-source:'+id+':'+bucket,'SOURCE_WARNING','Une variante de marché est indisponible ; les autres variantes restent examinées.',category.toUpperCase(),null,{market_id:id,error:String(error).slice(0,400)});}
+    }
+    if(!markets.length)return;
+    const primary=markets.find(m=>m.id===memo?.market_id)||markets[0];for(const m of markets){m.fixture_context=primary.question+' '+(primary.event_title||'');this.repo.putMarket(m);}
+    const old=this.repo.dossier(primary.id),sources=await this.markets.evidence(primary),external=independentFacts(sources);
+    for(const m of markets.filter(m=>m.id!==primary.id)){const rule:Source={id:await hash({id:m.id,rules:m.description}),url:m.url,title:'Règles du marché alternatif : '+m.question,text:m.description,fetched_at:now(),status:'VERIFIED',provider:'Polymarket'};this.repo.document(rule);sources.push(rule);}
+    const facts=await hash(external.map(x=>({provider:x.provider,text:factualText(x.text)})).sort((a,b)=>a.provider.localeCompare(b.provider))),price=primary.books.YES?.asks[0]?.price||null;
+    const prices=Object.fromEntries(markets.flatMap(m=>Object.entries(m.books).map(([side,b])=>[m.id+':'+side,b?.asks[0]?.price||null])));
+    const lessonSeq=this.repo.one("SELECT max(seq) n FROM events WHERE kind='LESSON' AND json_extract(details,'$.category')=? AND (json_extract(details,'$.result') IS NOT NULL OR json_extract(details,'$.counterfactual_id') IS NOT NULL)",category)?.n||0;
+    const changedAlternative=memo?.prices&&Date.now()-Date.parse(memo.at)>=CONFIG.reviewDebounceMinutes*60000&&Object.entries(prices).some(([id,p])=>p&&memo.prices[id]&&Math.abs(Number(p)-Number(memo.prices[id]))>=CONFIG.reviewPriceMove);
+    const stat=this.repo.get<any>('scan:'+category),note=(field:string)=>{if(stat&&Math.floor(Date.parse(stat.at)/600000)===bucket){stat[field]=(stat[field]||0)+1;this.repo.set('scan:'+category,stat);}};
+    if(!needsReview(memo&&memo.market_id!==primary.id?{...memo,price:null}:memo,facts,price,Date.now(),lessonSeq)&&!changedAlternative){this.repo.set(reviewKey,{...memo,checked_at:now()});note('reused');return;}
+    const alternatives=markets.map(m=>({id:m.id,question:m.question,outcomes:m.outcome_labels,url:m.url,rules_excerpt:m.description.slice(0,900),books:Object.fromEntries(Object.entries(m.books).map(([side,b])=>[side,b?{observed_at:b.observed_at,asks:b.asks.slice(0,3),minimum:b.minimum,tick:b.tick,fee_rate:b.fee_rate,fee_exponent:b.fee_exponent}:null]))}));
+    const payload={source_ids:sources.filter(x=>x.status==='VERIFIED').map(x=>x.id),source_failures:sources.filter(x=>x.status!=='VERIFIED').map(x=>x.provider),reference_price:price,price_vector:prices,previous_analysis:old?.payload.analysis||null,analyzed_at:old?.payload.analyzed_at||null,fact_hash:facts,event_group:group,alternatives,related_markets:alternatives.map(m=>({id:m.id,question:m.question})),lesson_seq:lessonSeq};
+    if(!external.length||!sourceFreshness(primary,sources).fresh){
+      for(const source of sources)if(['ESPN','OpenDota'].includes(source.provider))this.repo.requestSource(source.url);
+      this.repo.putDossier({id:primary.id,market_id:primary.id,category,status:'RESEARCH_PENDING',priority,hash:facts,payload:{...payload,data_reason:'Aucune source indépendante suffisamment actuelle : recherche de données sans appel IA inutile.'}});
+      this.repo.set(reviewKey,{market_id:primary.id,at:now(),checked_at:now(),facts,price,prices,status:'RESEARCH_PENDING',lesson_seq:lessonSeq});note('unsupported');return;
+    }
+    const revision=await hash({market:primary.id,facts,prices,lessonSeq});
+    this.repo.putDossier({id:primary.id,market_id:primary.id,category,status:'PENDING',priority,hash:revision,payload});
+    this.repo.set(reviewKey,{market_id:primary.id,at:now(),checked_at:now(),facts,price,prices,status:'PENDING',lesson_seq:lessonSeq});
+    this.repo.enqueue('analysis:'+primary.id+':'+revision,'ANALYZE',{id:primary.id});note('prepared');
   }
   expireDossiers(){
     const s=this.repo.state();if(!s)return;const bucket=Math.floor(Date.now()/600000);if(this.repo.get('expiry_bucket')===bucket)return;this.repo.set('expiry_bucket',bucket);
@@ -167,7 +190,7 @@ export class Engine {
     const positions=this.repo.rows('SELECT market_id,outcome,status,cost,quantity,payload FROM positions').map(r=>({...r,payload:JSON.parse(r.payload)}));
     const books=Object.fromEntries(Object.entries(m.books||{}).map(([k,b]:any)=>[k,{observed_at:b.observed_at,asks:b.asks.slice(0,5),minimum:b.minimum,tick:b.tick,fee_rate:b.fee_rate,fee_exponent:b.fee_exponent}]));
     return {now:now(),market:{...m,books:undefined},executable_books:books,proposal:p||null,fx:s.fx,cash:this.repo.cash(),fund_initial_eur:s.initial_eur,betting_deadline:s.betting_deadline,mode:s.mode,
-      sources:this.sources(d.payload.source_ids||[]),data_quality:sourceFreshness(m,this.sources(d.payload.source_ids||[])),analysis_prepared_at:d.payload.analyzed_at||null,related_markets:d.payload.related_markets||[],memory,positions,previous_analysis:d.payload.previous_analysis||null,
+      sources:this.sources(d.payload.source_ids||[]),data_quality:sourceFreshness(m,this.sources(d.payload.source_ids||[])),analysis_prepared_at:d.payload.analyzed_at||null,related_markets:d.payload.related_markets||[],alternatives:d.payload.alternatives||[],memory,positions,previous_analysis:d.payload.previous_analysis||null,
       history:meeting?this.repo.events(0,meeting.id,200).filter(e=>['SPEECH','AMENDMENT','QUESTION'].includes(e.kind)).slice(-10):[],
       voting_rules:{votes_required:4,majority:3,abstention_requires:'essential blocker and reconsideration condition; disagreement means AGAINST',chair_can_change_mind_in_tie:true,technical_veto_only:true}};
   }
@@ -194,11 +217,17 @@ export class Engine {
     return value;
   }
   async analyze(id:string){
-    const s=this.repo.state()!,d=this.repo.dossier(id);if(!d||s.status!=='RUNNING'||Date.now()>=Date.parse(s.betting_deadline!))return;
+    const s=this.repo.state()!;let d=this.repo.dossier(id);if(!d||s.status!=='RUNNING'||Date.now()>=Date.parse(s.betting_deadline!))return;
     if(d.status!=='PENDING')return;
     const actor=d.category.toUpperCase() as MemberId;
     try{
       const analysis=await this.ask(`analysis:${d.id}:${d.hash}`,actor,'independent_analysis',this.context(d),AnalysisSchema);
+      if(analysis.market_id&&analysis.market_id!==d.market_id){
+        if(!(d.payload.alternatives||[]).some((m:any)=>m.id===analysis.market_id))throw Error('UNKNOWN_SELECTED_MARKET');
+        const chosen=this.repo.market(analysis.market_id);if(!chosen||this.repo.one('SELECT id FROM positions WHERE market_id=?',chosen.id))throw Error('SELECTED_MARKET_UNAVAILABLE');
+        const original=d;original.status='RESEARCH_REFERENCE';original.payload.selection_note='Le spécialiste a retenu un autre marché de cet événement : '+chosen.question;this.repo.putDossier(original);
+        d={...original,id:chosen.id,market_id:chosen.id,status:'PENDING',payload:{...original.payload,reference_price:chosen.books.YES?.asks[0]?.price||null,origin_market_id:original.id}};
+      }
       if(analysis.recommendation==='PROPOSE'&&(!analysis.side||!analysis.amount||!analysis.max_price||analysis.estimated_yes_probability===null))throw Error('INCOMPLETE_INVESTMENT_PROPOSAL');
       if(analysis.recommendation==='PROPOSE'&&(D(analysis.amount!).lte(0)||D(analysis.max_price!).lte(0)||D(analysis.max_price!).gte(1)))throw Error('INVALID_INVESTMENT_PROPOSAL');
       d.payload.analysis=analysis;d.payload.analyzed_at=now();d.status=analysis.recommendation==='PROPOSE'?'PROPOSED':'WAIT';this.repo.putDossier(d);
@@ -206,8 +235,8 @@ export class Engine {
       if(analysis.lesson)this.repo.event(`analysis:${d.id}:${d.hash}:lesson`,'HYPOTHESIS',analysis.lesson,actor,null,{market_id:d.market_id});
       if(analysis.recommendation==='WAIT')this.counterfactual(d,null,'WAIT',analysis.reasoning,analysis.side||'YES');
       else this.emergency(d,analysis.urgency_reason||'La proposition ne peut pas attendre le prochain conseil.');
-      this.repo.set('fixture_review:'+d.category+':'+(d.payload.event_group||this.repo.market(d.market_id).group),{market_id:d.market_id,at:now(),facts:d.payload.fact_hash||'',price:d.payload.reference_price||null,status:d.status,lesson_seq:d.payload.lesson_seq||0});
-    }catch(e){d.status='TECHNICAL_ERROR';d.payload.error=this.errorCode(e);d.payload.analyzed_at=now();this.repo.putDossier(d);const m=this.repo.market(d.market_id);if(m)this.repo.set('fixture_review:'+d.category+':'+m.group,{market_id:d.market_id,at:now(),facts:d.payload.fact_hash||'',price:d.payload.reference_price||null,status:'TECHNICAL_ERROR'});throw e;}
+      this.repo.set('fixture_review:'+d.category+':'+(d.payload.event_group||this.repo.market(d.market_id).group),{market_id:d.market_id,at:now(),facts:d.payload.fact_hash||'',price:this.repo.market(d.market_id)?.books.YES?.asks[0]?.price||d.payload.reference_price||null,prices:d.payload.price_vector||{},status:d.status,lesson_seq:d.payload.lesson_seq||0});
+    }catch(e){d.status='TECHNICAL_ERROR';d.payload.error=this.errorCode(e);d.payload.analyzed_at=now();this.repo.putDossier(d);const m=this.repo.market(d.market_id);if(m)this.repo.set('fixture_review:'+d.category+':'+m.group,{market_id:d.market_id,at:now(),facts:d.payload.fact_hash||'',price:this.repo.market(d.market_id)?.books.YES?.asks[0]?.price||d.payload.reference_price||null,prices:d.payload.price_vector||{},status:'TECHNICAL_ERROR'});throw e;}
   }
   emergency(d:any,reason:string){
     const s=this.repo.state()!,m=this.repo.market(d.market_id);if(s.status!=='RUNNING'||!m||Date.now()>=Date.parse(s.betting_deadline!))return;
@@ -272,7 +301,8 @@ export class Engine {
     d.payload.source_ids=sources.filter(x=>x.status==='VERIFIED').map(x=>x.id);d.payload.fact_hash=facts;d.payload.reference_price=price;this.repo.putDossier(d);
     if(changed){
       const key=meeting.id+':refresh:'+d.id+':'+await hash({facts,price});
-      const analysis=await this.ask(key,d.category.toUpperCase(),'independent_analysis',{...this.context(d),instruction:'Les faits ou le prix ont changé depuis ta préparation. Confirme, révise ou retire la proposition à partir de ce dossier actualisé. Ne conserve pas une probabilité ancienne par inertie.'},AnalysisSchema,meeting.id);
+      const analysis=await this.ask(key,d.category.toUpperCase(),'independent_analysis',{...this.context(d),instruction:'Les faits ou le prix ont changé depuis ta préparation. Réexamine uniquement market.id : market_id doit rester null ou market.id, les autres marchés nécessitent un dossier distinct. Confirme, révise ou retire la proposition à partir de ce dossier actualisé. Ne conserve pas une probabilité ancienne par inertie.'},AnalysisSchema,meeting.id);
+      if(analysis.market_id&&analysis.market_id!==d.market_id)throw Error('REFRESH_SELECTED_MARKET_MISMATCH');
       if(analysis.recommendation==='PROPOSE'&&(!analysis.side||!analysis.amount||!analysis.max_price||analysis.estimated_yes_probability===null||D(analysis.amount).lte(0)||D(analysis.max_price).lte(0)||D(analysis.max_price).gte(1)))throw Error('INVALID_REFRESHED_PROPOSAL');
       d.payload.previous_analysis=d.payload.analysis;d.payload.analysis=analysis;d.payload.analyzed_at=now();this.repo.putDossier(d);
       this.repo.event(key+':speech','ANALYSIS_REFRESH',analysis.speech,d.category.toUpperCase(),meeting.id,{market_id:d.market_id,reason:'Données actualisées avant débat',estimated_yes_probability:analysis.estimated_yes_probability});

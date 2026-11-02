@@ -101,7 +101,7 @@ export function normalize(raw:any,category:Category,at=now()):Market{
   if(raw.version&&!['v1','v2'].includes(raw.version))throw Error('UNKNOWN_PROTOCOL');
   const t=timing(raw,category);
   const slug=String(raw.events?.[0]?.slug||raw.slug||raw.id),fixture=category==='weather'?null:slug.match(/^(.*?20\d\d-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01]))(?:-|$)/)?.[1];
-  return {id:String(raw.id),question:raw.question,event_title:String(raw.events?.[0]?.title||raw.question),description:String(raw.description||'').slice(0,14000),category,url:`https://polymarket.com/event/${slug}`,group:fixture||String(raw.events?.[0]?.id||raw.id),version:raw.version||'v1',
+  return {id:String(raw.id),question:raw.question,event_title:String(raw.events?.[0]?.title||raw.question),description:String(raw.description||'').slice(0,14000),category,url:`https://polymarket.com/event/${slug}`,group:category==='weather'?'weather:'+(cities.find(c=>new RegExp('\\b'+c.station+'\\b','i').test(String(raw.description||'')+' '+String(raw.resolutionSource||'')))||cities.find(c=>c.names.test(raw.question)))!.station+':'+t.start+':'+(/lowest/i.test(raw.question)?'min':/rain|precipitation/i.test(raw.question)?'rain':'max'):fixture||String(raw.events?.[0]?.id||raw.id),version:raw.version||'v1',
     condition_id:raw.conditionId||raw.condition_id||null,question_id:raw.questionID||raw.questionId||raw.question_id||null,assets:{YES:String(assets[0]),NO:String(assets[1])},outcome_labels:{YES:String(outcomes[0]),NO:String(outcomes[1])},start_at:t.start,end_at:raw.endDate,event_end_at:t.end,
     resolution_source:String(raw.resolutionSource||raw.events?.[0]?.resolutionSource||String(raw.description||'').match(/https:\/\/[^\s)]+/)?.[0]||''),active:!!(raw.active&&!raw.closed&&raw.acceptingOrders),resolved:false,payouts:null,resolution_evidence:null,
     liquidity:String(raw.liquidityNum||raw.liquidity||'0'),volume:String(raw.volume24hr||'0'),books:{},delay_seconds:Number(raw.secondsDelay||0),observed_at:at,
@@ -181,6 +181,7 @@ export class Markets {
     if(!category)throw Error('UNSUPPORTED_CATEGORY');
     // Closed market timing is preserved from the originally verified dossier.
     let m:Market;try{m=normalize(raw,category);}catch(e){const saved=this.repo.market(id);if(!saved)throw e;m={...saved,books:{},active:false,observed_at:now()};}
+    const existing=this.repo.market(id);if(existing?.group===m.group)m.fixture_context=existing.fixture_context;
     if(!withBooks||raw.closed||raw.umaResolutionStatus==='resolved'||raw.resolutionStatus==='resolved'){
       if(m.condition_id||m.question_id){
         const res=await this.resolutionRows(raw);
@@ -237,7 +238,7 @@ export class Markets {
       const prefix=m.url.split('/event/')[1]?.split('-')[0],mapping:Record<string,string>={bra:'soccer/bra.1',epl:'soccer/eng.1',lal:'soccer/esp.1',bund:'soccer/ger.1',bun:'soccer/ger.1',lig1:'soccer/fra.1',ita:'soccer/ita.1',mls:'soccer/usa.1',ucl:'soccer/uefa.champions',nba:'basketball/nba',wnba:'basketball/wnba',atp:'tennis/atp',wta:'tennis/wta'};
       const hint=mapping[prefix],leagues=hint?[hint]:m.category==='football'?['soccer/eng.1','soccer/esp.1','soccer/ger.1','soccer/fra.1','soccer/ita.1','soccer/bra.1','soccer/usa.1','soccer/uefa.champions']:m.category==='basketball'?['basketball/nba','basketball/wnba']:['tennis/atp','tennis/wta'];
       for(const league of leagues)for(const day of days){
-        const s=await this.source(`https://site.api.espn.com/apis/site/v2/sports/${league}/scoreboard?dates=${day}`,`Rencontres et informations publiques ${league}`,'ESPN',d=>(d.events||[]).filter((e:any)=>{const text=m.question+' '+(m.event_title||'')+' '+m.description.slice(0,1500)+(hint?' '+m.url:''),competitors=e.competitions?.flatMap((c:any)=>c.competitors||[])||[];return competitors.filter((t:any)=>[t.team?.displayName,t.team?.shortDisplayName,hint?t.team?.abbreviation:null,t.athlete?.displayName,t.athlete?.fullName].some(n=>nameMatches(n,text))).length>=2&&Math.abs(Date.parse(e.date)-date)<18*3600000;}).map((e:any)=>sportsFacts(e)).slice(0,6));
+        const s=await this.source(`https://site.api.espn.com/apis/site/v2/sports/${league}/scoreboard?dates=${day}`,`Rencontres et informations publiques ${league}`,'ESPN',d=>(d.events||[]).filter((e:any)=>{const text=m.question+' '+(m.event_title||'')+' '+(m.fixture_context||'')+' '+m.description.slice(0,1500)+(hint?' '+m.url:''),competitors=e.competitions?.flatMap((c:any)=>c.competitors||[])||[];return competitors.filter((t:any)=>[t.team?.displayName,t.team?.shortDisplayName,hint?t.team?.abbreviation:null,t.athlete?.displayName,t.athlete?.fullName].some(n=>nameMatches(n,text))).length>=2&&Math.abs(Date.parse(e.date)-date)<18*3600000;}).map((e:any)=>sportsFacts(e)).slice(0,6));
         sources.push(s);
       }
     }
