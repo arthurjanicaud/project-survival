@@ -6,6 +6,7 @@ import {Azure,ProviderError,usageCost} from './azure';
 import {D,execute,tally,arbitrate} from './finance';
 import {nextSlots,parisDay} from './schedule';
 import {report as buildReport} from './report';
+import {factualText,needsReview,decisionDeadline,independentFacts,sourceFreshness,type Review} from './research';
 
 type MarketService=Pick<Markets,'catalog'|'inspect'|'evidence'|'fx'>&{synthetic?:boolean};
 type AgentService=Pick<Azure,'ask'>&{synthetic?:boolean};
@@ -13,7 +14,7 @@ export class Engine {
   constructor(public repo:Repository,public env:Env,public markets:MarketService=new Markets(repo),public azure:AgentService=new Azure(repo,env)){}
   prepare(id=this.env.EXPERIMENT_ID,mode:State['mode']='live'){
     if((this.markets.synthetic||this.azure.synthetic)&&mode!=='demo')throw Error('SYNTHETIC_DATA_FORBIDDEN');
-    const old=this.repo.state();if(old){if(old.id!==id)throw Error('EXPERIMENT_ID_MISMATCH');return old;}
+    const old=this.repo.state();if(old){if(old.id!==id)throw Error('EXPERIMENT_ID_MISMATCH');const policy=this.repo.get<any>('policy');if(policy?.version!==CONFIG.version){const history=this.repo.get<any[]>('policy_revisions')||[];this.repo.set('policy_revisions',[...history,{at:now(),previous:policy,current:{...CONFIG,durationHours:old.duration_hours||CONFIG.durationHours}}]);this.repo.set('policy',{...CONFIG,durationHours:old.duration_hours||CONFIG.durationHours});this.repo.event('policy:'+CONFIG.version,'POLICY_UPDATE','Correction technique du moteur : règlement, recherche mutualisée, calendrier et mémoire factuelle. Le journal antérieur reste conservé.','SECRETARY',null,{version:CONFIG.version});}return old;}
     const s:State={id,mode,status:'READY',started_at:null,end_at:null,betting_deadline:null,fx:null,initial_eur:CONFIG.initialEur,created_at:now(),updated_at:now(),last_scan:null,last_cycle:null,emergency_day:'',emergency_count:0,last_emergency:null,last_error:null};
     s.duration_hours=mode==='test'?24:CONFIG.durationHours;
     this.repo.save(s);this.repo.set('policy',{...CONFIG,durationHours:s.duration_hours});return s;
@@ -41,12 +42,16 @@ export class Engine {
   }
   tick(){
     const s=this.repo.state();if(!s||s.mode==='validation')return;
-    if(['READY','RUNNING'].includes(s.status)&&this.env.GITHUB_NOTIFIER_TOKEN){const feed=this.repo.get<any>('research_collector'),dispatch=this.repo.get<any>('research_dispatch');if((!feed?.at||Date.now()-Date.parse(feed.at)>=25*60000)&&(!dispatch?.dispatched_at||Date.now()-Date.parse(dispatch.dispatched_at)>=5*60000))this.repo.enqueue('research-dispatch:'+Math.floor(Date.now()/300000),'RESEARCH_DISPATCH',{});}
+    if(['READY','RUNNING'].includes(s.status)&&this.env.GITHUB_NOTIFIER_TOKEN){const feed=this.repo.get<any>('research_collector'),dispatch=this.repo.get<any>('research_dispatch');if((!feed?.at||Date.now()-Date.parse(feed.at)>=CONFIG.researchRefreshMinutes*60000)&&(!dispatch?.dispatched_at||Date.now()-Date.parse(dispatch.dispatched_at)>=5*60000))this.repo.enqueue('research-dispatch:'+Math.floor(Date.now()/300000),'RESEARCH_DISPATCH',{});}
     if(s.status==='READY')return;
+    this.expireDossiers();
+    if(s.status==='RUNNING')for(const row of this.repo.rows("SELECT * FROM dossiers WHERE status='PROPOSED' ORDER BY priority DESC"))this.emergency({...row,payload:JSON.parse(row.payload)},'Échéance détectée par le calendrier, indépendamment du drapeau urgent de l’IA.');
     if(s.status==='FINISHED'){if(this.repo.one("SELECT id FROM counterfactuals WHERE status IN ('PENDING','DATA_UNAVAILABLE','NON_EXECUTABLE') LIMIT 1"))this.repo.enqueue('settle-followup:'+Math.floor(Date.now()/3600000),'SETTLE',{});return;}
     const at=now(),bucket=Math.floor(Date.now()/(CONFIG.scanMinutes*60000));
     if(Date.now()<Date.parse(s.betting_deadline!))for(const category of CATEGORIES)this.repo.enqueue(`scan:${bucket}:${category}`,'SCAN',{category});
     this.repo.enqueue('settle:'+bucket,'SETTLE',{});
+    const held=this.repo.rows("SELECT market_id FROM positions WHERE status='PENDING' ORDER BY created_at").map(p=>p.market_id);
+    for(let offset=CONFIG.settlementBatch;offset<held.length;offset+=CONFIG.settlementBatch)this.repo.enqueue('settle-funds:'+bucket+':'+offset,'SETTLE_FUNDS',{ids:held.slice(offset,offset+CONFIG.settlementBatch)});
     if(Date.now()>=Date.parse(s.end_at!))this.repo.enqueue('finish:'+bucket,'FINISH',{});
     this.repo.prune();
   }
@@ -97,58 +102,72 @@ export class Engine {
     else if(job.kind==='EMERGENCY')await this.slot(job.payload.slot,'EXTRAORDINARY',job.payload.id);
     else if(job.kind==='MEETING')await this.advance(job.payload.id);
     else if(job.kind==='SETTLE')await this.settlements();
+    else if(job.kind==='SETTLE_FUNDS')await this.settlements(job.payload.ids,true);
     else if(job.kind==='FINISH')this.finish();
     else throw Error('UNKNOWN_JOB');
   }
   async scan(category:Category){
     const s=this.repo.state()!;if(s.status!=='RUNNING'||Date.now()>=Date.parse(s.betting_deadline!))return;
-    const raw=await this.markets.catalog(category,s.betting_deadline!);const candidates:any[]=[];const exclusions:Record<string,number>={};
-    for(const r of raw){
-      try{
-        const m=normalize(r,category);
-        if(!m.active||!m.description||!m.resolution_source)throw Error('MISSING_RULES_OR_CLOSED');
-        if(Date.parse(m.event_end_at)<=Date.now())throw Error('EVENT_ALREADY_ENDED');
-        if(Date.parse(m.event_end_at)>Date.parse(s.betting_deadline!))throw Error('OUTSIDE_WINDOW');
-        if(this.repo.one('SELECT id FROM positions WHERE market_id=?',m.id))continue;
-        const previous=this.repo.dossier(m.id);if(previous&&['INVESTED','IN_MEETING'].includes(previous.status))continue;
-        const hours=(Date.parse(m.start_at||m.event_end_at)-Date.now())/3600000;
-        const priority=Math.log10(Math.max(1,Number(m.liquidity)))*10+Math.max(0,20-hours)+(previous?-8:10)+coveragePreference(m);
-        candidates.push({m,priority,previous});
-      }catch(e){const c=this.errorCode(e);exclusions[c]=(exclusions[c]||0)+1;}
-    }
-    candidates.sort((a,b)=>b.priority-a.priority);
-    let prepared=0;const failures:string[]=[];
-    const groups=new Set();const diversified=candidates.filter(c=>{if(groups.has(c.m.group))return false;groups.add(c.m.group);return true;});
-    for(const {m,priority,previous} of diversified.slice(0,3)){
-      try{
-        // Review on meaningful change or after cooldown; never run an AI for
-        // every changed order-book hash or mere collector timestamp.
-        this.repo.putMarket(m);const full=await this.markets.inspect(m.id);this.repo.putMarket(full);
-        const price=full.books.YES?.asks[0]?.price;
-        const oldPrice=previous?.payload?.reference_price;
-        const aged=!previous||Date.now()-Date.parse(previous.payload.analyzed_at||previous.updated_at)>=CONFIG.analysisCooldownMinutes*60000;
-        const changed=oldPrice&&price&&Math.abs(Number(price)-Number(oldPrice))>=.04;
-        if(previous&&!aged&&!changed)continue;
-        const sources=await this.markets.evidence(full);const fingerprint=await hash({question:full.question,rules:full.description,end:full.event_end_at,price,sources:sources.filter(x=>x.status==='VERIFIED').map(x=>x.id)});
-        if(previous?.hash===fingerprint&&!aged)continue;
-        const revision=fingerprint+':'+Math.floor(Date.now()/(CONFIG.analysisCooldownMinutes*60000));
-        this.repo.putDossier({id:full.id,market_id:full.id,category,status:'PENDING',priority,hash:revision,payload:{source_ids:sources.filter(x=>x.status==='VERIFIED').map(x=>x.id),source_failures:sources.filter(x=>x.status!=='VERIFIED').map(x=>x.provider),reference_price:price,previous_analysis:previous?.payload?.analysis||null,analyzed_at:previous?.payload?.analyzed_at||null}});
-        this.repo.enqueue('analysis:'+full.id+':'+revision,'ANALYZE',{id:full.id});prepared++;
-      }catch(e){failures.push(this.errorCode(e));}
-    }
-    this.repo.set('scan:'+category,{at:now(),discovered:raw.length,eligible:candidates.length,prepared,exclusions,errors:failures});
+    this.expireDossiers();
+    const raw=await this.markets.catalog(category,s.betting_deadline!);
+    const previous=new Map(this.repo.rows('SELECT * FROM dossiers WHERE category=?',category).map(r=>[r.id,{...r,payload:JSON.parse(r.payload)}]));
+    const reviews=new Map(this.repo.rows("SELECT key,value FROM meta WHERE key LIKE ?",'fixture_review:'+category+':%').map(r=>[r.key,JSON.parse(r.value)]));
+    const groups=new Map<string,any[]>(),exclusions:Record<string,number>={};let eligible=0;
+    for(const r of raw){try{
+      const m=normalize(r,category),old=previous.get(m.id);
+      if(!m.active||!m.description||!m.resolution_source)throw Error('MISSING_RULES_OR_CLOSED');
+      if(Date.parse(m.event_end_at)<=Date.now())throw Error('EVENT_ALREADY_ENDED');
+      if(Date.parse(m.event_end_at)>Date.parse(s.betting_deadline!))throw Error('OUTSIDE_WINDOW');
+      if(old&&['INVESTED','IN_MEETING'].includes(old.status))continue;
+      eligible++;const hours=(Date.parse(m.start_at||m.event_end_at)-Date.now())/3600000;
+      const item={m,priority:Math.log10(Math.max(1,Number(m.liquidity)))*10+Math.max(0,20-hours)+coveragePreference(m),previous:old};
+      if(!groups.has(m.group))groups.set(m.group,[]);groups.get(m.group)!.push(item);
+    }catch(e){const code=this.errorCode(e);exclusions[code]=(exclusions[code]||0)+1;}}
+    const selected=[...groups.values()].map(items=>{
+      items.sort((a,b)=>b.priority-a.priority);
+      const memo=reviews.get('fixture_review:'+category+':'+items[0].m.group) as Review|undefined;
+      return {...(items.find(x=>x.m.id===memo?.market_id)||items[0]),memo,related:items.slice(0,4).map(x=>({id:x.m.id,question:x.m.question}))};
+    }).sort((a,b)=>(b.priority+(b.memo?Math.min(60,(Date.now()-Date.parse(b.memo.checked_at||b.memo.at))/60000)-20:60))-(a.priority+(a.memo?Math.min(60,(Date.now()-Date.parse(a.memo.checked_at||a.memo.at))/60000)-20:60)));
+    let prepared=0,reused=0,unsupported=0;const failures:string[]=[];
+    const lessonSeq=this.repo.one("SELECT max(seq) n FROM events WHERE kind='LESSON' AND json_extract(details,'$.category')=? AND (json_extract(details,'$.result') IS NOT NULL OR json_extract(details,'$.counterfactual_id') IS NOT NULL)",category)?.n||0;
+    for(const {m,priority,previous:old,memo,related} of selected.slice(0,3)){try{
+      if(old?.status==='PENDING')continue;
+      this.repo.putMarket(m);const full=await this.markets.inspect(m.id);this.repo.putMarket(full);
+      const sources=await this.markets.evidence(full),external=independentFacts(sources);
+      const facts=await hash(external.map(x=>({provider:x.provider,text:factualText(x.text)})).sort((a,b)=>a.provider.localeCompare(b.provider)));
+      const price=full.books.YES?.asks[0]?.price||null;
+      const comparable=memo&&memo.market_id!==full.id?{...memo,price:null}:memo||null;
+      if(!needsReview(comparable,facts,price,Date.now(),lessonSeq)){reused++;this.repo.set('fixture_review:'+category+':'+full.group,{...memo,checked_at:now()});continue;}
+      const payload={source_ids:sources.filter(x=>x.status==='VERIFIED').map(x=>x.id),source_failures:sources.filter(x=>x.status!=='VERIFIED').map(x=>x.provider),reference_price:price,previous_analysis:old?.payload.analysis||null,analyzed_at:old?.payload.analyzed_at||null,fact_hash:facts,event_group:full.group,related_markets:related,lesson_seq:lessonSeq};
+      if(!external.length||sourceFreshness(full,sources).in_play&&!sourceFreshness(full,sources).fresh){unsupported++;this.repo.putDossier({id:full.id,market_id:full.id,category,status:'RESEARCH_PENDING',priority,hash:facts,payload:{...payload,data_reason:'Aucune source indépendante exploitable : le collecteur recherche les données, sans appel IA inutile.'}});this.repo.set('fixture_review:'+category+':'+full.group,{market_id:full.id,at:now(),facts,price,status:'RESEARCH_PENDING',lesson_seq:lessonSeq});continue;}
+      const revision=await hash({market:full.id,facts,price,lessonSeq});
+      this.repo.putDossier({id:full.id,market_id:full.id,category,status:'PENDING',priority,hash:revision,payload});
+      this.repo.set('fixture_review:'+category+':'+full.group,{market_id:full.id,at:now(),facts,price,status:'PENDING',lesson_seq:lessonSeq});
+      this.repo.enqueue('analysis:'+full.id+':'+revision,'ANALYZE',{id:full.id});prepared++;
+    }catch(e){failures.push(this.errorCode(e));}}
+    this.repo.set('scan:'+category,{at:now(),discovered:raw.length,eligible,prepared,reused,unsupported,fixtures:groups.size,exclusions,errors:failures});
     s.last_scan=now();this.repo.save(s);
-    this.repo.event(`scan:${category}:${Math.floor(Date.now()/600000)}`,'SCAN',`${category} : ${raw.length} marchés détectés, ${candidates.length} admissibles, ${prepared} dossiers actualisés.`,'SECRETARY',null,{category,exclusions,errors:failures});
-    if(diversified.slice(0,3).length&&failures.length===diversified.slice(0,3).length)throw Error('MARKET_BOOK_PROVIDER_UNAVAILABLE');
+    this.repo.event(`scan:${category}:${Math.floor(Date.now()/600000)}`,'SCAN',`${category} : ${raw.length} marchés, ${groups.size} événements distincts, ${prepared} analyses nécessaires, ${reused} dossiers réutilisés, ${unsupported} en attente de données.`,'SECRETARY',null,{category,exclusions,errors:failures});
+    if(selected.slice(0,3).length&&failures.length===selected.slice(0,3).length)throw Error('MARKET_BOOK_PROVIDER_UNAVAILABLE');
+  }
+  expireDossiers(){
+    const s=this.repo.state();if(!s)return;const bucket=Math.floor(Date.now()/600000);if(this.repo.get('expiry_bucket')===bucket)return;this.repo.set('expiry_bucket',bucket);
+    for(const row of this.repo.rows("SELECT * FROM dossiers WHERE status IN ('PROPOSED','PENDING','WAIT','RESEARCH_PENDING','TECHNICAL_ERROR','POSTPONE','TECHNICAL_REJECTION')")){
+      const m=this.repo.market(row.market_id);if(!m)continue;
+      if(Date.parse(m.event_end_at)<=Date.now()||s.betting_deadline&&Date.now()>=Date.parse(s.betting_deadline)){
+        const d={...row,payload:JSON.parse(row.payload)},previous=d.status;d.status='EXPIRED';d.payload.expired_at=now();d.payload.previous_status=previous;this.repo.putDossier(d);
+        if(previous==='PROPOSED')this.repo.event('expired:'+d.id+':'+d.hash,'PROPOSAL_EXPIRED',`La proposition sur « ${m.question} » a dépassé sa fenêtre de décision. Elle reste archivée, sans être encore présentée comme en attente.`,d.category.toUpperCase(),null,{market_id:m.id});
+      }
+    }
   }
   sources(ids:string[]):Source[]{return ids.map(id=>this.repo.one('SELECT * FROM documents WHERE id=?',id)).filter(Boolean);}
   context(d:any,meeting?:any,p?:Proposal){
     const s=this.repo.state()!,m=this.repo.market(d.market_id);
-    const memory=this.repo.rows("SELECT kind,text,details FROM events WHERE kind IN ('SETTLEMENT','LESSON') ORDER BY seq DESC LIMIT 5").map(e=>({kind:e.kind,text:e.text,details:JSON.parse(e.details)}));
+    const memory=this.repo.rows("SELECT kind,text,details FROM events WHERE kind='SETTLEMENT' OR (kind='LESSON' AND (json_extract(details,'$.result') IS NOT NULL OR json_extract(details,'$.counterfactual_id') IS NOT NULL)) ORDER BY seq DESC LIMIT 5").map(e=>({kind:e.kind,text:e.text,details:JSON.parse(e.details)}));
     const positions=this.repo.rows('SELECT market_id,outcome,status,cost,quantity,payload FROM positions').map(r=>({...r,payload:JSON.parse(r.payload)}));
     const books=Object.fromEntries(Object.entries(m.books||{}).map(([k,b]:any)=>[k,{observed_at:b.observed_at,asks:b.asks.slice(0,5),minimum:b.minimum,tick:b.tick,fee_rate:b.fee_rate,fee_exponent:b.fee_exponent}]));
     return {now:now(),market:{...m,books:undefined},executable_books:books,proposal:p||null,fx:s.fx,cash:this.repo.cash(),fund_initial_eur:s.initial_eur,betting_deadline:s.betting_deadline,mode:s.mode,
-      sources:this.sources(d.payload.source_ids||[]),memory,positions,previous_analysis:d.payload.previous_analysis||null,
+      sources:this.sources(d.payload.source_ids||[]),data_quality:sourceFreshness(m,this.sources(d.payload.source_ids||[])),analysis_prepared_at:d.payload.analyzed_at||null,related_markets:d.payload.related_markets||[],memory,positions,previous_analysis:d.payload.previous_analysis||null,
       history:meeting?this.repo.events(0,meeting.id,200).filter(e=>['SPEECH','AMENDMENT','QUESTION'].includes(e.kind)).slice(-10):[],
       voting_rules:{votes_required:4,majority:3,abstention_requires:'essential blocker and reconsideration condition; disagreement means AGAINST',chair_can_change_mind_in_tie:true,technical_veto_only:true}};
   }
@@ -158,15 +177,20 @@ export class Engine {
   }
   async ask<T>(id:string,actor:MemberId,phase:string,context:any,schema:z.ZodType<T>,meeting:string|null=null):Promise<T>{
     if(meeting)this.repo.event(id+':thinking','THINKING',`${MEMBERS.find(m=>m.id===actor)?.name} prépare son intervention.`,actor,meeting);
-    let value:any=await this.azure.ask(id,actor,phase,context,schema,meeting);
+    let value:any=await this.azure.ask(id,actor,phase,context,schema,meeting);let permitted:Source[]=[...(context.sources||[])];
     if(value.document_requests?.length){
       const found:Source[]=[];
-      for(const query of value.document_requests){const documents=this.repo.retrieve(query);found.push(...documents);this.repo.event(id+':document:'+await hash(query),'DOCUMENT',documents.length?`Le secrétaire retrouve ${documents.length} document(s) pour « ${query} ».`:`Le secrétaire ne trouve pas de document pertinent pour « ${query} ».`, 'SECRETARY',meeting,{query,documents:documents.map(d=>({id:d.id,title:d.title,url:d.url}))});}
+      for(const query of value.document_requests){const documents=this.repo.retrieve(query,3,/histor|passé|archive|réunion|décision|erreur|succès|résultat|leçon/i.test(query));found.push(...documents);this.repo.event(id+':document:'+await hash(query),'DOCUMENT',documents.length?`Le secrétaire retrouve ${documents.length} document(s) pour « ${query} ».`:`Le secrétaire ne trouve pas de document pertinent pour « ${query} ».`, 'SECRETARY',meeting,{query,documents:documents.map(d=>({id:d.id,title:d.title,url:d.url}))});}
       const existing=new Set((context.sources||[]).map((s:Source)=>s.id));
-      const fresh=[...new Map(found.filter(s=>!existing.has(s.id)).map(s=>[s.id,s])).values()];
-      if(fresh.length)value=await this.azure.ask(id+':documents',actor,phase,{...context,secretary_results:fresh.map(d=>({...d,text:d.text.slice(0,1800)})),instruction:'Voici les documents retrouvés, pas nécessairement la réponse à ta question. Termine sans nouvelle demande. Les archives du conseil ne sont pas une source indépendante sur les événements.'},schema,meeting);
-      this.citations(value,[...(context.sources||[]),...found]);
-    }else this.citations(value,context.sources||[]);
+      const fresh=[...new Map(found.filter(s=>!existing.has(s.id)&&(s.provider!=='Council archive'||/^SETTLEMENT\n/.test(s.text)||/^LESSON\n/.test(s.text)&&(/"result":|"counterfactual_id":/.test(s.text)))).map(s=>[s.id,s])).values()].filter(s=>!(context.sources||[]).some((old:Source)=>factualText(old.text)===factualText(s.text))&&!(context.memory||[]).some((old:any)=>s.text.includes(old.text)));
+      this.repo.set('secretary_followup_last',{at:now(),requested:value.document_requests.length,found:found.length,new_external:fresh.length,followup:fresh.length>0});
+      if(fresh.length){permitted.push(...fresh);value=await this.azure.ask(id+':documents',actor,phase,{...context,secretary_results:fresh.map(d=>({...d,text:d.text.slice(0,1800)})),instruction:'Voici les documents retrouvés, pas nécessairement la réponse à ta question. Termine sans nouvelle demande. Les archives du conseil ne sont pas une source indépendante sur les événements.'},schema,meeting);}
+    }
+    try{this.citations(value,permitted);}catch(e){
+      if(this.errorCode(e)!=='UNVERIFIED_CITATION')throw e;
+      value=await this.azure.ask(id+':citation-repair',actor,phase,{...context,instruction:'Une citation ne correspond pas au texte fourni. Corrige les citations en recopiant exactement les extraits visibles et leurs source_id. Si aucun extrait ne convient, citations=[] et signale la limite. Ne crée aucun fait ni nouvelle demande documentaire.'},schema,meeting);
+      this.citations(value,context.sources||[]);
+    }
     return value;
   }
   async analyze(id:string){
@@ -179,20 +203,27 @@ export class Engine {
       if(analysis.recommendation==='PROPOSE'&&(D(analysis.amount!).lte(0)||D(analysis.max_price!).lte(0)||D(analysis.max_price!).gte(1)))throw Error('INVALID_INVESTMENT_PROPOSAL');
       d.payload.analysis=analysis;d.payload.analyzed_at=now();d.status=analysis.recommendation==='PROPOSE'?'PROPOSED':'WAIT';this.repo.putDossier(d);
       this.repo.event(`analysis:${d.id}:${d.hash}:speech`,'ANALYSIS',analysis.speech,actor,null,{market_id:d.market_id,recommendation:analysis.recommendation,estimated_yes_probability:analysis.estimated_yes_probability});
-      if(analysis.lesson)this.repo.event(`analysis:${d.id}:${d.hash}:lesson`,'LESSON',analysis.lesson,actor,null,{market_id:d.market_id});
+      if(analysis.lesson)this.repo.event(`analysis:${d.id}:${d.hash}:lesson`,'HYPOTHESIS',analysis.lesson,actor,null,{market_id:d.market_id});
       if(analysis.recommendation==='WAIT')this.counterfactual(d,null,'WAIT',analysis.reasoning,analysis.side||'YES');
-      else if(analysis.urgent)this.emergency(d,analysis.urgency_reason);
-    }catch(e){d.status='TECHNICAL_ERROR';d.payload.error=this.errorCode(e);d.payload.analyzed_at=now();this.repo.putDossier(d);throw e;}
+      else this.emergency(d,analysis.urgency_reason||'La proposition ne peut pas attendre le prochain conseil.');
+      this.repo.set('fixture_review:'+d.category+':'+(d.payload.event_group||this.repo.market(d.market_id).group),{market_id:d.market_id,at:now(),facts:d.payload.fact_hash||'',price:d.payload.reference_price||null,status:d.status,lesson_seq:d.payload.lesson_seq||0});
+    }catch(e){d.status='TECHNICAL_ERROR';d.payload.error=this.errorCode(e);d.payload.analyzed_at=now();this.repo.putDossier(d);const m=this.repo.market(d.market_id);if(m)this.repo.set('fixture_review:'+d.category+':'+m.group,{market_id:d.market_id,at:now(),facts:d.payload.fact_hash||'',price:d.payload.reference_price||null,status:'TECHNICAL_ERROR'});throw e;}
   }
   emergency(d:any,reason:string){
-    const s=this.repo.state()!,m=this.repo.market(d.market_id);const next=nextSlots(now(),s.end_at,1)[0];
-    const urgent=m.start_at&&(!next||Date.parse(m.start_at)<Date.parse(next)+1800000);
+    const s=this.repo.state()!,m=this.repo.market(d.market_id);if(s.status!=='RUNNING'||!m||Date.now()>=Date.parse(s.betting_deadline!))return;
+    const next=nextSlots(now(),s.betting_deadline,1)[0],deadline=decisionDeadline(m,s.betting_deadline!);
+    if(next&&deadline>Date.parse(next)+CONFIG.maxMeetingSeconds*1000)return;
+    if(Date.parse(m.event_end_at)<=Date.now()||this.repo.one("SELECT id FROM meetings WHERE status IN ('RUNNING','PAUSED')"))return;
     const day=parisDay(now());if(s.emergency_day!==day){s.emergency_day=day;s.emergency_count=0;}
-    if(!urgent||d.priority<30||s.emergency_count>=CONFIG.emergencyMaxPerDay||s.last_emergency&&Date.now()-Date.parse(s.last_emergency)<CONFIG.emergencyCooldownMinutes*60000)return;
-    if(this.repo.one("SELECT id FROM meetings WHERE status IN ('RUNNING','PAUSED')"))return;
+    if(CONFIG.emergencyMaxPerDay>0&&s.emergency_count>=CONFIG.emergencyMaxPerDay)return;
+    const cooldown=s.last_emergency?Date.parse(s.last_emergency)+CONFIG.emergencyCooldownMinutes*60000:0;
+    if(Date.now()<cooldown&&deadline>cooldown+CONFIG.maxMeetingSeconds*1000)return;
+    const due=new Date(Math.max(Date.now()+1000,Math.min(Date.now()+CONFIG.emergencyBatchSeconds*1000,deadline))).toISOString();
+    const pending=this.repo.one("SELECT id,due_at FROM jobs WHERE kind='EMERGENCY' AND status IN ('PENDING','RUNNING') ORDER BY due_at LIMIT 1");
+    if(pending){if(due<pending.due_at)this.repo.run("UPDATE jobs SET due_at=? WHERE id=? AND status='PENDING'",due,pending.id);return;}
     s.emergency_count++;s.last_emergency=now();this.repo.save(s);
-    const slot='urgent:'+d.id+':'+d.hash.slice(0,16);this.repo.enqueue(slot,'EMERGENCY',{id:d.id,slot});
-    this.repo.event(slot+':request','EMERGENCY_REQUEST',reason,d.category.toUpperCase(),null,{market_id:d.market_id,priority:d.priority});
+    const slot='urgent:'+now();this.repo.enqueue(slot,'EMERGENCY',{slot},due);
+    this.repo.event(slot+':request','EMERGENCY_REQUEST',reason+' Les propositions sont regroupées avant la prochaine échéance.','SECRETARY',null,{market_id:m.id,decision_deadline:new Date(deadline).toISOString(),scheduled_at:due});
   }
   async slot(slot:string,kind:string,onlyId?:string){
     const s=this.repo.state()!;if(s.status!=='RUNNING')return;
@@ -202,6 +233,7 @@ export class Engine {
       this.repo.event(id+':missed','SLOT_MISSED','Créneau reporté : une réunion précédente est encore active.','SECRETARY',null,{slot,kind});return;
     }
     const list=(onlyId?[this.repo.dossier(onlyId)]:this.repo.rows("SELECT * FROM dossiers WHERE status='PROPOSED' ORDER BY priority DESC").map(r=>({...r,payload:JSON.parse(r.payload)}))).filter(d=>d?.status==='PROPOSED');
+    if(kind==='EXTRAORDINARY')list.sort((a,b)=>decisionDeadline(this.repo.market(a.market_id),s.betting_deadline!)-decisionDeadline(this.repo.market(b.market_id),s.betting_deadline!));
     const agenda:any[]=[];const used=new Set();
     for(const d of list){const m=this.repo.market(d.market_id);if(!m?.active||Date.parse(m.event_end_at)<=Date.now()||Date.parse(m.event_end_at)>Date.parse(s.betting_deadline!))continue;if(used.has(d.category)&&list.some(x=>!used.has(x.category)))continue;agenda.push(d);used.add(d.category);if(agenda.length>=CONFIG.maxAgenda)break;}
     if(!agenda.length){
@@ -220,13 +252,41 @@ export class Engine {
     this.enqueueMeeting(m);
   }
   enqueueMeeting(m:any,delay=0){this.repo.enqueue(`${m.id}:${m.payload.index}:${m.payload.agenda[m.payload.index]||'end'}:${m.stage}:${m.payload.retried?'retry':''}:${m.payload.abstention_reviewed?'review':''}`,'MEETING',{id:m.id},new Date(Date.now()+delay).toISOString());}
-  speech(id:string,meeting:any,actor:MemberId,value:any){this.repo.event(id,'SPEECH',value.speech,actor,meeting.id,{estimated_yes_probability:value.estimated_yes_probability??null,objection:value.objection||null,citations:value.citations||[]});}
+  speech(id:string,meeting:any,actor:MemberId,value:any){this.repo.event(id,'SPEECH',value.speech,actor,meeting.id,{market_id:this.repo.dossier(meeting.payload.agenda[meeting.payload.index])?.market_id,estimated_yes_probability:value.estimated_yes_probability??null,objection:value.objection||null,citations:value.citations||[]});}
+  async prepareMeetingDossier(d:any,meeting:any){
+    if(this.repo.state()!.mode==='demo')return true;
+    if(meeting.payload.prepared?.[d.id])return true;
+    const fresh=await this.markets.inspect(d.market_id);this.repo.putMarket(fresh);
+    if(!fresh.active||Date.parse(fresh.event_end_at)<=Date.now()){d.status='EXPIRED';this.repo.putDossier(d);this.repo.event(meeting.id+':expired:'+d.id,'PROPOSAL_EXPIRED','Le marché n’est plus ouvert à une décision. Aucun appel au conseil ni achat ne sera inventé.','SECRETARY',meeting.id,{market_id:d.market_id});this.nextDossier(meeting);return false;}
+    const sources=await this.markets.evidence(fresh),quality=sourceFreshness(fresh,sources);
+    if(!quality.fresh){
+      for(const source of sources)if(['ESPN','OpenDota'].includes(source.provider))this.repo.requestSource(source.url);
+      meeting.payload.refresh_wait??={};const since=meeting.payload.refresh_wait[d.id]||now();meeting.payload.refresh_wait[d.id]=since;
+      this.repo.putMeeting(meeting);this.repo.enqueue('research-meeting:'+meeting.id+':'+d.id,'RESEARCH_DISPATCH',{});
+      if(Date.now()-Date.parse(since)<120000&&Date.now()+120000<Date.parse(meeting.payload.deadline))throw new ProviderError('MEETING_DATA_PENDING');
+      const p={id:meeting.id+':'+d.id,meeting_id:meeting.id,market_id:d.market_id,version:1,side:d.payload.analysis.side,amount:d.payload.analysis.amount,max_price:d.payload.analysis.max_price,status:'POSTPONE',reason:'Sources sportives absentes ou trop anciennes après demande de rafraîchissement.',created_at:now()} as Proposal;
+      this.repo.putProposal(p);await this.reject(meeting,d,p,'POSTPONE',p.reason);return false;
+    }
+    const facts=await hash(independentFacts(sources).map(x=>({provider:x.provider,text:factualText(x.text)})).sort((a,b)=>a.provider.localeCompare(b.provider))),price=fresh.books.YES?.asks[0]?.price||null;
+    const changed=d.payload.fact_hash&&facts!==d.payload.fact_hash||price&&d.payload.reference_price&&Math.abs(Number(price)-Number(d.payload.reference_price))>=CONFIG.reviewPriceMove;
+    d.payload.source_ids=sources.filter(x=>x.status==='VERIFIED').map(x=>x.id);d.payload.fact_hash=facts;d.payload.reference_price=price;this.repo.putDossier(d);
+    if(changed){
+      const key=meeting.id+':refresh:'+d.id+':'+await hash({facts,price});
+      const analysis=await this.ask(key,d.category.toUpperCase(),'independent_analysis',{...this.context(d),instruction:'Les faits ou le prix ont changé depuis ta préparation. Confirme, révise ou retire la proposition à partir de ce dossier actualisé. Ne conserve pas une probabilité ancienne par inertie.'},AnalysisSchema,meeting.id);
+      if(analysis.recommendation==='PROPOSE'&&(!analysis.side||!analysis.amount||!analysis.max_price||analysis.estimated_yes_probability===null||D(analysis.amount).lte(0)||D(analysis.max_price).lte(0)||D(analysis.max_price).gte(1)))throw Error('INVALID_REFRESHED_PROPOSAL');
+      d.payload.previous_analysis=d.payload.analysis;d.payload.analysis=analysis;d.payload.analyzed_at=now();this.repo.putDossier(d);
+      this.repo.event(key+':speech','ANALYSIS_REFRESH',analysis.speech,d.category.toUpperCase(),meeting.id,{market_id:d.market_id,reason:'Données actualisées avant débat',estimated_yes_probability:analysis.estimated_yes_probability});
+      if(analysis.recommendation==='WAIT'){d.status='WAIT';this.repo.putDossier(d);this.counterfactual(d,null,'WAIT',analysis.reasoning,analysis.side||'YES');this.nextDossier(meeting);return false;}
+    }
+    meeting.payload.prepared??={};meeting.payload.prepared[d.id]={at:now(),facts,source_ids:d.payload.source_ids};this.repo.putMeeting(meeting);return true;
+  }
   async advance(id:string){
     const meeting=this.repo.meeting(id);if(!meeting||!['RUNNING','PAUSED'].includes(meeting.status))return;
     const s=this.repo.state()!,d=this.repo.dossier(meeting.payload.agenda[meeting.payload.index]);
     if(Date.now()>Date.parse(meeting.payload.deadline)||Date.now()>=Date.parse(s.betting_deadline!)){this.endMeeting(meeting,'CANCELLED','Réunion interrompue : délai atteint. Aucun nouveau vote ou achat ne sera inventé.');return;}
+    if(meeting.stage==='DISCUSS'&&!await this.prepareMeetingDossier(d,meeting))return;
     const market=this.repo.market(d.market_id);let p=this.repo.proposal(meeting.id+':'+d.id);
-    if(!p){const a=d.payload.analysis; p={id:meeting.id+':'+d.id,meeting_id:meeting.id,market_id:d.market_id,version:1,side:a.side,amount:a.amount,max_price:a.max_price,status:'DISCUSSING',reason:a.reasoning,created_at:now()};this.repo.putProposal(p);this.repo.event(p.id+':initial','SPEECH',a.speech,d.category.toUpperCase(),meeting.id,{proposal:p,independent_analysis:true});}
+    if(!p){const a=d.payload.analysis; p={id:meeting.id+':'+d.id,meeting_id:meeting.id,market_id:d.market_id,version:1,side:a.side,amount:a.amount,max_price:a.max_price,status:'DISCUSSING',reason:a.reasoning,created_at:now()};this.repo.putProposal(p);this.repo.event(p.id+':initial','SPEECH',a.speech,d.category.toUpperCase(),meeting.id,{proposal:p,market_id:d.market_id,estimated_yes_probability:a.estimated_yes_probability,independent_analysis:true});}
     if(!['YES','NO'].includes(p.side)||!p.amount||!p.max_price){await this.reject(meeting,d,p,'TECHNICAL_REJECTION','Proposition incomplète : aucun vote d’achat ni débit autorisé.');return;}
     const context=this.context(d,meeting,p),key=`${p.id}:v${p.version}`;
     if(meeting.stage==='DISCUSS'){
@@ -241,6 +301,7 @@ export class Engine {
       this.speech(key+':chair:speech',meeting,'CHAIR',value);
       if(value.amendment)p=this.amend(meeting,d,p,value.amendment,'CHAIR');
       if(meeting.payload.market_replaced){delete meeting.payload.market_replaced;this.repo.putMeeting(meeting);this.enqueueMeeting(meeting);return;}
+      p.estimated_yes_probability=value.estimated_yes_probability??null;this.repo.putProposal(p);
       if(value.question&&panel(d.category).includes(value.question_to as MemberId)){
         meeting.payload.question=value.question;meeting.payload.question_to=value.question_to;
         this.repo.event(key+':question','QUESTION',value.question,'CHAIR',meeting.id,{to:value.question_to});meeting.stage='REBUT';
@@ -355,28 +416,33 @@ export class Engine {
     this.repo.event(m.id+':end','MEETING_END',summary,'SECRETARY',m.id,{status});
     this.repo.notify(m.id+':end',status==='COMPLETED'?'Conseil terminé':'Incident au conseil',summary,this.link(m.id),status==='COMPLETED'?3:4);
   }
-  async settlements(){
-    const ids=new Set<string>([...this.repo.rows("SELECT market_id FROM positions WHERE status='PENDING'"),...this.repo.rows("SELECT market_id FROM counterfactuals WHERE status IN ('PENDING','DATA_UNAVAILABLE','NON_EXECUTABLE')")].map(r=>r.market_id));
-    const backlog=[...ids],storedCursor=this.repo.get<number>('settlement_cursor')||0,cursor=storedCursor>=backlog.length?0:storedCursor;
-    let checked=0,failed=0;
-    for(const id of backlog.slice(cursor,cursor+10)){
+  async settlements(fundIds?:string[],fundsOnly=false){
+    const held=this.repo.rows("SELECT market_id FROM positions WHERE status='PENDING' ORDER BY created_at").map(r=>r.market_id);
+    const funds=(fundIds||held.slice(0,CONFIG.settlementBatch)).filter(id=>held.includes(id));
+    const backlog=[...new Set<string>(this.repo.rows("SELECT market_id FROM counterfactuals WHERE status IN ('PENDING','DATA_UNAVAILABLE','NON_EXECUTABLE')").map(r=>r.market_id))].filter(id=>!funds.includes(id)).sort();
+    const last=this.repo.get<string>('counterfactual_cursor_v2')||'',after=backlog.filter(id=>id>last);
+    const counter=fundsOnly?[]:[...after,...backlog.filter(id=>id<=last)].slice(0,CONFIG.counterfactualBatch);
+    let checked=0,failed=0,pendingFunds=0;
+    for(const id of [...funds,...counter]){
       try{
         const m=await this.markets.inspect(id,false);this.repo.putMarket(m);checked++;
-        if(!m.resolved||!m.payouts)continue;
-        for(const position of this.repo.rows("SELECT * FROM positions WHERE market_id=? AND status='PENDING'",id))this.repo.settle(position,m);
+        const positions=this.repo.rows("SELECT * FROM positions WHERE market_id=? AND status='PENDING'",id);
+        if(!m.resolved||!m.payouts){pendingFunds+=positions.length;for(const p of positions){const payload=JSON.parse(p.payload);payload.resolution_check={at:now(),status:'AWAITING_OFFICIAL',evidence:m.resolution_evidence};this.repo.run('UPDATE positions SET payload=? WHERE id=?',JSON.stringify(payload),p.id);}continue;}
+        for(const position of positions)this.repo.settle(position,m);
         for(const row of this.repo.rows("SELECT * FROM counterfactuals WHERE market_id=? AND status IN ('PENDING','DATA_UNAVAILABLE','NON_EXECUTABLE')",id)){
-          const c=JSON.parse(row.payload),payout=D(c.execution.quantity).mul(m.payouts[c.side as 'YES'|'NO']);
-          c.official_result=m.payouts;c.payout=c.execution.fills.length?payout.toFixed():null;c.profit=c.execution.fills.length?payout.minus(c.execution.spent).toFixed():null;c.settled_at=now();c.resolution_evidence=m.resolution_evidence;
+          const c=JSON.parse(row.payload),fills=!!c.execution?.fills?.length,payout=fills?D(c.execution.quantity).mul(m.payouts[c.side as 'YES'|'NO']):null;
+          c.official_result=m.payouts;c.payout=payout?.toFixed()??null;c.profit=payout?payout.minus(c.execution.spent).toFixed():null;c.settled_at=now();c.resolution_evidence=m.resolution_evidence;
           c.brier_score=c.estimated_yes_probability===null||!['0','1'].includes(D(m.payouts.YES).toFixed())?null:D(c.estimated_yes_probability).minus(m.payouts.YES).pow(2).toFixed();
           c.quality_assessment=c.ex_ante_review||'Pertinence évaluée selon les informations et motifs initiaux, séparément du résultat.';
           this.repo.run('UPDATE counterfactuals SET status=?,payload=? WHERE id=?',c.profit===null?'OUTCOME_ONLY':'SETTLED',JSON.stringify(c),row.id);
           const result=c.profit===null?'L’issue est connue, mais aucun gain fictif n’est calculé faute de cotation exécutable.':`Une mise théorique de 10 € aurait produit ${D(c.profit).div(this.repo.state()!.fx!.usd_per_eur).toDecimalPlaces(2)} € nets.`;
-          this.repo.event(row.id+':review','LESSON',`Occasion non retenue : « ${c.question} ». ${result} Motif initial conservé : ${c.reason}. Ce résultat ne suffit pas à qualifier le refus d’erreur.`,'SECRETARY',null,{category:c.category,counterfactual_id:row.id,brier_score:c.brier_score,ex_ante_assessment:c.quality_assessment});
+          this.repo.event(row.id+':review','LESSON',`Occasion non retenue : « ${c.question} ». ${result} Motif initial conservé : ${c.reason}. Ce résultat ne suffit pas à qualifier le refus d’erreur.`,'SECRETARY',null,{category:c.category,counterfactual_id:row.id,brier_score:c.brier_score,ex_ante_assessment:c.quality_assessment,result:m.payouts});
         }
-      }catch(e){failed++;this.repo.set('settlement_error:'+id,{at:now(),code:this.errorCode(e)});}
+      }catch(e){failed++;this.repo.set('settlement_error:'+id,{at:now(),code:this.errorCode(e)});for(const p of this.repo.rows("SELECT id,payload FROM positions WHERE market_id=? AND status='PENDING'",id)){const payload=JSON.parse(p.payload);payload.resolution_check={at:now(),status:'PROVIDER_ERROR',error:this.errorCode(e)};this.repo.run('UPDATE positions SET payload=? WHERE id=?',JSON.stringify(payload),p.id);}}
     }
-    this.repo.set('settlement_cursor',cursor+10>=backlog.length?0:cursor+10);
-    this.repo.set('settlement_status',{at:now(),checked,failed,pending_markets:backlog.length,status:failed?'PARTIAL':'OK'});
+    if(counter.length)this.repo.set('counterfactual_cursor_v2',counter[counter.length-1]);
+    const remaining=this.repo.one("SELECT count(*) n FROM positions WHERE status='PENDING'")?.n||0;
+    this.repo.set('settlement_status',{at:now(),checked,failed,fund_markets_checked:funds.length,pending_fund_positions:remaining,pending_markets:backlog.length,status:failed?'PARTIAL':remaining?'AWAITING_OFFICIAL':'OK'});
     if(failed&&!checked)throw Error('SETTLEMENT_PROVIDER_UNAVAILABLE');
     const s=this.repo.state()!;s.last_cycle=now();this.repo.save(s);
     if(Date.now()>=Date.parse(s.end_at!))this.finish();
@@ -426,7 +492,7 @@ export class Engine {
       counterfactuals:this.repo.rows('SELECT * FROM counterfactuals ORDER BY rowid DESC LIMIT 80').map(c=>({...c,payload:JSON.parse(c.payload)})),
       infrastructure:{azure:{...azure,circuit:this.repo.get('azure_circuit')},
         storage_bytes:this.repo.sql.databaseSize??null,notifications_configured:!!this.env.NTFY_TOPIC,notification_failures:this.repo.one("SELECT count(*) AS n FROM notifications WHERE status='PENDING' AND attempt>=3")?.n||0,
-        preflight:this.repo.get('preflight'),notification_delivery:this.env.NTFY_DELIVERY||'direct',notification_relay:this.repo.get('notification_relay'),pending_notifications:this.repo.one("SELECT count(*) n FROM notifications WHERE status='PENDING'")?.n||0,last_notification_sent:this.repo.one("SELECT max(json_extract(payload,'$.sent_at')) at FROM notifications WHERE status='SENT'")?.at||null,research_collector:this.repo.get('research_collector'),settlement_status:this.repo.get('settlement_status'),provider_errors:this.repo.rows("SELECT key,value FROM meta WHERE key LIKE 'provider_error:%'").map(r=>({provider:r.key.split(':')[1],...JSON.parse(r.value)})),scans:Object.fromEntries(CATEGORIES.map(c=>[c,this.repo.get('scan:'+c)])),health:this.repo.get('health'),quota:this.repo.get('quota'),
+        preflight:this.repo.get('preflight'),secretary_followup:this.repo.get('secretary_followup_last'),policy_version:CONFIG.version,notification_delivery:this.env.NTFY_DELIVERY||'direct',notification_relay:this.repo.get('notification_relay'),pending_notifications:this.repo.one("SELECT count(*) n FROM notifications WHERE status='PENDING'")?.n||0,last_notification_sent:this.repo.one("SELECT max(json_extract(payload,'$.sent_at')) at FROM notifications WHERE status='SENT'")?.at||null,research_collector:this.repo.get('research_collector'),settlement_status:this.repo.get('settlement_status'),provider_errors:this.repo.rows("SELECT key,value FROM meta WHERE key LIKE 'provider_error:%'").map(r=>({provider:r.key.split(':')[1],...JSON.parse(r.value)})),scans:Object.fromEntries(CATEGORIES.map(c=>[c,this.repo.get('scan:'+c)])),health:this.repo.get('health'),quota:this.repo.get('quota'),
         jobs:this.repo.rows('SELECT kind,status,count(*) AS count FROM jobs GROUP BY kind,status')},last_event_seq:events,report:this.repo.get('final_report')};
   }
   link(id:string){return this.env.PUBLIC_ORIGIN+'/?phase=3'+(this.repo.state()?.mode==='test'?'&experiment=test':'')+(id?'&meeting='+encodeURIComponent(id):'');}

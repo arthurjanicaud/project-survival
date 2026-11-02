@@ -18,10 +18,13 @@ export type MemberId = typeof MEMBERS[number]['id'];
 export const CONFIG = {
   durationHours:168, settlementBufferHours:6, initialEur:'1000', scanMinutes:10,
   meetingHours:[9,13,17,21], maxMeetingSeconds:600, maxAgenda:3,
-  emergencyCooldownMinutes:45, emergencyMaxPerDay:4, analysisCooldownMinutes:120,
+  emergencyCooldownMinutes:5, emergencyMaxPerDay:0, analysisCooldownMinutes:120,
+  emergencyBatchSeconds:45, decisionLeadSeconds:120, reviewDebounceMinutes:15,
+  technicalRetryMinutes:5, reviewPriceMove:.04, meetingSourceSeconds:900,inPlaySourceSeconds:300,
+  settlementBatch:12, counterfactualBatch:10,researchRefreshMinutes:10,
   fetchTimeoutMs:15000, azureTimeoutMs:75000, azureAttempts:2, maxContextChars:26000,
   maxOutputTokens:1800, maxBookAgeSeconds:180, documentChars:9000,
-  transientCacheHours:12, quotaWarningBytes:250_000_000, version:'survival-phase3-v1',
+  transientCacheHours:12, quotaWarningBytes:250_000_000, version:'survival-phase3-v2',
 };
 export type Env = {
   COUNCIL:DurableObjectNamespace; EXPERIMENT_ID:string; TEST_EXPERIMENT_ID?:string; AZURE_DEPLOYMENT:string;
@@ -31,7 +34,7 @@ export type Env = {
 export type Book = {asset_id:string; observed_at:string;exchange_at?:string; bids:{price:string;size:string}[]; asks:{price:string;size:string}[]; minimum:string;tick:string;fee_rate:string;fee_exponent:string;evidence:string};
 export type Source = {id:string;url:string;title:string;text:string;fetched_at:string;status:'VERIFIED'|'UNAVAILABLE';provider:string};
 export type Market = {id:string;question:string;event_title?:string;description:string;category:Category;url:string;group:string;version:'v1'|'v2';condition_id:string|null;question_id:string|null;assets:{YES:string;NO:string};outcome_labels?:{YES:string;NO:string};start_at:string|null;end_at:string;event_end_at:string;resolution_source:string;active:boolean;resolved:boolean;payouts:{YES:string;NO:string}|null;resolution_evidence:Record<string,unknown>|null;liquidity:string;volume:string;books:Partial<Record<'YES'|'NO',Book>>;delay_seconds:number;observed_at:string;tags:string[]};
-export type Proposal = {id:string;meeting_id:string;market_id:string;version:number;side:'YES'|'NO';amount:string;max_price:string;status:string;reason:string;created_at:string};
+export type Proposal = {id:string;meeting_id:string;market_id:string;version:number;side:'YES'|'NO';amount:string;max_price:string;status:string;reason:string;created_at:string;estimated_yes_probability?:number|null};
 export type State = {id:string;mode:'live'|'demo'|'validation'|'test';duration_hours?:number;status:'READY'|'RUNNING'|'CLOSING'|'FINISHED';started_at:string|null;end_at:string|null;betting_deadline:string|null;fx:{usd_per_eur:string;reference_date:string;source:string;method:string}|null;initial_eur:string;created_at:string;updated_at:string;last_scan:string|null;last_cycle:string|null;emergency_day:string;emergency_count:number;last_emergency:string|null;last_error:string|null};
 export const decimalString=z.string().regex(/^\d+(?:\.\d+)?$/).max(28);
 const nullableDecimal=decimalString.nullable();
@@ -49,7 +52,7 @@ export const SpeechSchema=z.object({speech:z.string().min(20).max(1800),estimate
   objection:z.string().max(700),amendment:z.object({market_id:z.string(),side:z.enum(['YES','NO']),amount:decimalString,max_price:decimalString,reason:z.string().min(15).max(700)}).strict().nullable(),
   citations:z.array(citation).max(4),document_requests:z.array(z.string().min(3).max(160)).max(2),
 }).strict();
-export const ChairSchema=z.object({speech:z.string().min(20).max(1800),question:z.string().max(600),question_to:z.string().max(30).nullable(),
+export const ChairSchema=z.object({estimated_yes_probability:z.number().min(0).max(1).nullable(),speech:z.string().min(20).max(1800),question:z.string().max(600),question_to:z.string().max(30).nullable(),
   amendment:z.object({market_id:z.string(),side:z.enum(['YES','NO']),amount:decimalString,max_price:decimalString,reason:z.string().min(15).max(700)}).strict().nullable(),document_requests:z.array(z.string().min(3).max(160)).max(2)}).strict();
 export const VoteSchema=z.object({vote:z.enum(['FOR','AGAINST','ABSTAIN']),speech:z.string().min(25).max(1100),
   abstention_reason:z.string().max(700),reconsider_if:z.string().max(500),proposal_id:z.string(),proposal_version:z.number().int().positive()}).strict();

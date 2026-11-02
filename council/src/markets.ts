@@ -3,7 +3,7 @@ import {Repository} from './repository';
 import {D} from './finance';
 
 const GAMMA='https://gamma-api.polymarket.com',CLOB='https://clob.polymarket.com',DATA='https://data-api.polymarket.com';
-const allowed=new Set(['gamma-api.polymarket.com','clob.polymarket.com','data-api.polymarket.com','api.frankfurter.dev','api.weather.gov','api.open-meteo.com','site.api.espn.com','api.opendota.com']);
+const allowed=new Set(['gamma-api.polymarket.com','clob.polymarket.com','data-api.polymarket.com','api.frankfurter.dev','api.weather.gov','api.open-meteo.com','ensemble-api.open-meteo.com','site.api.espn.com','api.opendota.com']);
 const arr=(x:any):any[]=>Array.isArray(x)?x:typeof x==='string'?JSON.parse(x):[];
 const numeric=(v:any)=>v===undefined||v===null?null:D(String(v)).toFixed();
 const nameKey=(v:any)=>String(v||'').normalize('NFKD').replace(/\p{M}/gu,'').toLowerCase().replace(/[^\p{L}\p{N}]+/gu,' ').trim();
@@ -28,6 +28,14 @@ export function classify(raw:any):Category|null{
   return null;
 }
 const cities=[
+  // Airport coordinates checked against NOAA Aviation Weather stationinfo.
+  {names:/beijing/i,lat:40.082,lon:116.603,tz:'Asia/Shanghai',station:'ZBAA'},
+  {names:/shanghai/i,lat:31.146,lon:121.8,tz:'Asia/Shanghai',station:'ZSPD'},
+  {names:/singapore/i,lat:1.368,lon:103.982,tz:'Asia/Singapore',station:'WSSS'},
+  {names:/s[aã]o paulo/i,lat:-23.432,lon:-46.469,tz:'America/Sao_Paulo',station:'SBGR'},
+  {names:/buenos aires/i,lat:-34.822,lon:-58.536,tz:'America/Argentina/Buenos_Aires',station:'SAEZ'},
+  {names:/ankara/i,lat:40.128,lon:32.995,tz:'Europe/Istanbul',station:'LTAC'},
+  {names:/wellington/i,lat:-41.331,lon:174.806,tz:'Pacific/Auckland',station:'NZWN'},
   {names:/atlanta/i,lat:33.6407,lon:-84.4277,tz:'America/New_York',station:'KATL'},
   {names:/new york|nyc/i,lat:40.7769,lon:-73.874,tz:'America/New_York',station:'KLGA'},
   {names:/chicago/i,lat:41.9742,lon:-87.9073,tz:'America/Chicago',station:'KORD'},
@@ -44,6 +52,15 @@ const cities=[
   {names:/tokyo/i,lat:35.5494,lon:139.7798,tz:'Asia/Tokyo',station:'RJTT'},
   {names:/hong kong/i,lat:22.308,lon:113.9185,tz:'Asia/Hong_Kong',station:'VHHH'},
 ];
+export function ensembleSummary(data:any,day:string){
+  const daily=data.daily||{},index=(daily.time||[]).indexOf(day);if(index<0)return null;
+  const distribution=(prefix:string)=>{const values=Object.entries(daily).filter(([k])=>k===prefix||k.startsWith(prefix+'_member')).map(([,v]:any)=>v[index]).filter((n:any)=>typeof n==='number'&&Number.isFinite(n)).sort((a:number,b:number)=>a-b);if(!values.length)return null;return {members:values.length,min:values[0],p10:values[Math.floor((values.length-1)*.1)],median:values[Math.floor((values.length-1)*.5)],p90:values[Math.floor((values.length-1)*.9)],max:values[values.length-1]};};
+  return {day,timezone:data.timezone,units:data.daily_units?.temperature_2m_max,maximum:distribution('temperature_2m_max'),minimum:distribution('temperature_2m_min'),limitation:'Ensemble grid forecast near the rule station. Spread is uncalibrated, not the true probability or final station observation.'};
+}
+export function sportsFacts(e:any){
+  const record=(r:any)=>({type:r.type||r.name,summary_unparsed:r.summary,statistics:r.stats?.filter((s:any)=>/wins|losses|ties|draws|points|played|percent/i.test(s.name||'')).map((s:any)=>({name:s.name,value:s.value,displayValue:s.displayValue}))});
+  return {name:e.name,date:e.date,status:{...e.status?.type,period:e.status?.period,display_clock:e.status?.displayClock},competitors:e.competitions?.flatMap((c:any)=>c.competitors?.map((t:any)=>({name:t.team?.displayName||t.athlete?.displayName,score:t.score,records:t.records?.map(record),statistics:t.statistics?.filter((s:any)=>/point|goal|rebound|turnover|assist|fieldGoal|threePoint|rank|win|loss|ace|serve|save|possession/i.test(s.name||'')).slice(0,12),homeAway:t.homeAway,rank:t.curatedRank,venue:c.venue?.fullName}))),links:e.links?.map((l:any)=>l.href),limitation:'Only supplied scoreboard statistics; scheduled zero values are not a live score. No unverified injury or roster claim.'};
+}
 export function localMidnight(day:string,tz:string){
   let t=Date.parse(day+'T00:00:00Z');
   for(let i=0;i<3;i++){
@@ -93,10 +110,18 @@ export function normalize(raw:any,category:Category,at=now()):Market{
 export function finalResolution(raw:any,rows:any[]):{YES:string;NO:string;evidence:any}|null{
   for(const r of rows){
     if(r.status!=='resolved')continue;
+    const condition=r.conditionId||r.condition_id,question=r.questionId||r.question_id;
+    if(!((condition&&condition===(raw.conditionId||raw.condition_id))||(question&&question===(raw.questionID||raw.questionId||raw.question_id))))continue;
     if(r.conditionId||r.condition_id){if((r.conditionId||r.condition_id)!==(raw.conditionId||raw.condition_id))continue;}
     if((r.questionId||r.question_id)&&(raw.questionID||raw.questionId||raw.question_id)&&(r.questionId||r.question_id)!==(raw.questionID||raw.questionId||raw.question_id))continue;
+    // Data API wire payouts are micro-USDC (e6), unlike the SDK's parsed
+    // Decimal payouts. Never confuse the two or infer a payout from a price.
     const payouts=arr(r.payouts),resolvedAt=r.resolvedAt||r.resolved_at;
-    if(payouts.length===2&&resolvedAt&&D(payouts[0]).plus(payouts[1]).eq(1)&&payouts.every((x:any)=>D(x).gte(0)&&D(x).lte(1)))return {YES:String(payouts[0]),NO:String(payouts[1]),evidence:{method:'Official final payout vector',resolved_at:resolvedAt}};
+    if(payouts.length===2&&resolvedAt){
+      try{const pair=payouts.map((v:any)=>D(String(v)).div(1_000_000));
+        if(pair[0].plus(pair[1]).eq(1)&&pair.every(v=>v.gte(0)&&v.lte(1)))return {YES:pair[0].toFixed(),NO:pair[1].toFixed(),evidence:{method:'Official final payout vector',wire_unit:'micro-USDC',wire_payouts:payouts,resolved_at:resolvedAt,condition_id:condition||null,question_id:question||null,transaction_hash:r.transaction_hash||r.transactionHash||null}};
+      }catch{/* Malformed or mixed units cannot become money. */}
+    }
     if((raw.version||'v1')==='v1'&&raw.umaResolutionStatus==='resolved'&&(r.transactionHash||r.transaction_hash)){
       const oracle=String(r.price),prices=arr(raw.outcomePrices);const values:Record<string,string[]>={'0':['0','1'],'500000000000000000':['0.5','0.5'],'1000000000000000000':['1','0']};
       const v=values[oracle];if(v&&prices.length===2&&D(prices[0]).eq(v[0])&&D(prices[1]).eq(v[1]))return {YES:v[0],NO:v[1],evidence:{method:'Final UMA price corroborated by Gamma outcomes',transaction_hash:r.transactionHash||r.transaction_hash,observed_at:now()}};
@@ -105,10 +130,20 @@ export function finalResolution(raw:any,rows:any[]):{YES:string;NO:string;eviden
 }
 export class Markets {
   constructor(private repo:Repository,private transport:typeof fetch=(...args)=>fetch(...args)){}
+  async resolutionRows(raw:any){
+    const condition=raw.conditionId||raw.condition_id,question=raw.questionID||raw.questionId||raw.question_id;
+    if(!condition&&!question)return [];
+    const res=await this.get(`${DATA}/v2/resolutions?${condition?'condition_id='+encodeURIComponent(condition):'question_id='+encodeURIComponent(question)}`);
+    const rows=Array.isArray(res)?res:res.data;if(!Array.isArray(rows))throw Error('INVALID_RESOLUTION_RESPONSE');return rows;
+  }
+  async resolutionDiagnostic(id:string){
+    const raw=await this.get(`${GAMMA}/markets/${encodeURIComponent(id)}`),rows=await this.resolutionRows(raw);
+    return {market_id:id,wire_market:Object.fromEntries(['id','version','closed','active','conditionId','condition_id','questionID','questionId','umaResolutionStatus','resolutionStatus','outcomes','outcomePrices'].map(k=>[k,raw[k]??null])),wire_resolutions:rows,final:finalResolution(raw,rows)};
+  }
   async get(url:string,cacheSeconds=0):Promise<any>{
     const u=new URL(url);if(!allowed.has(u.hostname)||u.protocol!=='https:'||u.username||u.password)throw Error('PROVIDER_NOT_ALLOWED');
     const research=this.repo.cache<any>('research:'+url);if(research)return research.data;
-    if(['site.api.espn.com','api.opendota.com'].includes(u.hostname))throw Error('SHARED_RESEARCH_FEED_MISSING_OR_STALE');
+    if(['site.api.espn.com','api.opendota.com'].includes(u.hostname)){this.repo.requestSource(url);throw Error('SHARED_RESEARCH_FEED_MISSING_OR_STALE');}
     if(cacheSeconds){const cached=this.repo.cache(url);if(cached)return cached;}
     const cooldown=this.repo.get<any>('provider_cooldown:'+u.hostname);if(cooldown?.until&&Date.parse(cooldown.until)>Date.now())throw Error('PROVIDER_RATE_LIMITED');
     for(let a=0;a<2;a++){
@@ -118,7 +153,7 @@ export class Markets {
         if(!r.ok){await r.body?.cancel();const retry=r.headers.get('retry-after'),parsed=Number(retry),wait=retry&&Number.isNaN(parsed)?Math.max(1,(Date.parse(retry)-Date.now())/1000):Math.max(1,Number.isFinite(parsed)?parsed:1);if(r.status===429)this.repo.set('provider_cooldown:'+u.hostname,{until:new Date(Date.now()+wait*1000).toISOString()});if((r.status===429||r.status>=500)&&a===0&&wait<=5){await new Promise(q=>setTimeout(q,(wait+.2)*1000));continue;}throw Error('PROVIDER_HTTP_'+r.status);}
         if(Number(r.headers.get('content-length')||0)>8_000_000){await r.body?.cancel();throw Error('PROVIDER_RESPONSE_TOO_LARGE');}
         const text=await r.text();if(text.length>8_000_000)throw Error('PROVIDER_RESPONSE_TOO_LARGE');
-        const data=JSON.parse(text);if(cacheSeconds)this.repo.putCache(url,data,cacheSeconds);return data;
+        const data=JSON.parse(text);if(cacheSeconds){this.repo.putCache(url,data,cacheSeconds);this.repo.putCache('observed:'+url,now(),cacheSeconds);}return data;
       }finally{clearTimeout(timer);}
     }throw Error('PROVIDER_UNAVAILABLE');
   }
@@ -146,11 +181,11 @@ export class Markets {
     if(!category)throw Error('UNSUPPORTED_CATEGORY');
     // Closed market timing is preserved from the originally verified dossier.
     let m:Market;try{m=normalize(raw,category);}catch(e){const saved=this.repo.market(id);if(!saved)throw e;m={...saved,books:{},active:false,observed_at:now()};}
-    if(raw.closed||raw.umaResolutionStatus==='resolved'){
+    if(!withBooks||raw.closed||raw.umaResolutionStatus==='resolved'||raw.resolutionStatus==='resolved'){
       if(m.condition_id||m.question_id){
-        const res=await this.get(`${DATA}/v2/resolutions?${m.condition_id?'condition_id='+encodeURIComponent(m.condition_id):'question_id='+encodeURIComponent(m.question_id!)}`);
-        const final=finalResolution(raw,Array.isArray(res)?res:res.data||[]);
-        if(final){m.resolved=true;m.active=false;m.payouts={YES:final.YES,NO:final.NO};m.resolution_evidence=final.evidence;}
+        const res=await this.resolutionRows(raw);
+        const final=finalResolution(raw,res);
+        if(final){m.resolved=true;m.active=false;m.payouts={YES:final.YES,NO:final.NO};m.resolution_evidence=final.evidence;}else{if(res.some((r:any)=>r.status==='resolved'))throw Error('UNRECOGNIZED_FINAL_PAYOUT');m.resolution_evidence={pending:true,observed_at:now(),lifecycle:res.map((r:any)=>({status:r.status,expected_settlement_time:r.expected_settlement_time,extended_review:r.extended_review,was_disputed:r.was_disputed}))};}
       }
       return m;
     }
@@ -171,7 +206,7 @@ export class Markets {
     return m;
   }
   async source(url:string,title:string,provider:string,select:(data:any)=>any):Promise<Source>{
-    try{const raw=await this.get(url,900),selected=select(raw);if(!selected||Array.isArray(selected)&&!selected.length)throw Error('NO_MATCHING_DATA');const text=typeof selected==='string'?selected:JSON.stringify(selected);const source:Source={id:await hash({url,text}),url,title,text:text.slice(0,CONFIG.documentChars),fetched_at:this.repo.cache<any>('research:'+url)?.fetched_at||now(),provider,status:'VERIFIED'};this.repo.document(source);return source;}
+    try{const raw=await this.get(url,900),selected=select(raw);if(!selected||Array.isArray(selected)&&!selected.length)throw Error('NO_MATCHING_DATA');const text=typeof selected==='string'?selected:JSON.stringify(selected),fetched_at=this.repo.cache<any>('research:'+url)?.fetched_at||this.repo.cache<string>('observed:'+url)||now();const source:Source={id:await hash({url,text,fetched_at}),url,title,text:text.slice(0,CONFIG.documentChars),fetched_at,provider,status:'VERIFIED'};this.repo.document(source);return source;}
     catch(e){const code=e instanceof Error?e.message.slice(0,180):'UNAVAILABLE';if(code!=='NO_MATCHING_DATA'){const previous=this.repo.get<any>('provider_error:'+provider);if(!previous||previous.code!==code||Date.now()-Date.parse(previous.at)>600000)this.repo.set('provider_error:'+provider,{at:now(),code});}return {id:await hash(url),url,title,text:'Source indisponible : '+code,fetched_at:now(),provider,status:'UNAVAILABLE'};}
   }
   async evidence(m:Market):Promise<Source[]>{
@@ -182,20 +217,28 @@ export class Markets {
       const city=cities.find(c=>new RegExp('\\b'+c.station+'\\b','i').test(stationText))||cities.find(c=>c.names.test(m.question));if(!city)return sources;
       const url=`https://api.open-meteo.com/v1/forecast?latitude=${city.lat}&longitude=${city.lon}&daily=temperature_2m_max,temperature_2m_min,precipitation_sum&timezone=${encodeURIComponent(city.tz)}&forecast_days=8&temperature_unit=${/°F|fahrenheit/i.test(m.question)?'fahrenheit':'celsius'}`;
       sources.push(await this.source(url,`Prévision maillée près de ${city.station} (pas une mesure de station)`,'Open-Meteo',d=>({location:{station_reference:city.station,grid_latitude:d.latitude,grid_longitude:d.longitude,timezone:d.timezone},units:d.daily_units,forecast:d.daily,limitation:'Grid forecast, not official final station observations. No historical error calibration supplied.'})));
+      const day=new Intl.DateTimeFormat('en-CA',{timeZone:city.tz,year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date(m.start_at||m.event_end_at));
+      sources.push(await this.source(`https://ensemble-api.open-meteo.com/v1/ensemble?latitude=${city.lat}&longitude=${city.lon}&daily=temperature_2m_max,temperature_2m_min&models=ecmwf_ifs025_ensemble&timezone=${encodeURIComponent(city.tz)}&forecast_days=8&temperature_unit=${/°F|fahrenheit/i.test(m.question)?'fahrenheit':'celsius'}`,`Distribution de prévisions ECMWF près de ${city.station}`,'Open-Meteo Ensemble',d=>ensembleSummary(d,day)));
       if(city.station.startsWith('K')){
         try{const point=await this.get(`https://api.weather.gov/points/${city.lat},${city.lon}`,86400);if(point.properties?.forecast)sources.push(await this.source(point.properties.forecast,`Prévision officielle NWS près de ${city.station}`,'NWS',d=>({updated:d.properties?.updated,periods:d.properties?.periods?.slice(0,12),limitation:'Forecast, not final observations; station and market rules remain controlling.'})));}catch{/* Grid source is explicitly labelled; no fabricated official forecast. */}
       }
     }else if(m.category==='esport'){
       // An organisation's CS/LoL roster is not its Dota roster.
-      if(/\bdota(?:\s*2)?\b/i.test(m.question+' '+m.url))sources.push(await this.source('https://api.opendota.com/api/teams','Statistiques publiques des équipes Dota 2','OpenDota',d=>d.filter((t:any)=>Number(t.last_match_time)>Date.now()/1000-30*86400&&(' '+nameKey(m.question)+' ').includes(' '+nameKey(t.name)+' ')&&nameKey(t.name).length>2).slice(0,8)));
+      if(/\bdota(?:\s*2)?\b/i.test(m.question+' '+m.url)){
+        const teams=await this.source('https://api.opendota.com/api/teams','Statistiques publiques des équipes Dota 2','OpenDota',d=>d.filter((t:any)=>Number(t.last_match_time)>Date.now()/1000-30*86400&&(' '+nameKey(m.question)+' ').includes(' '+nameKey(t.name)+' ')&&nameKey(t.name).length>2).slice(0,2));sources.push(teams);
+        if(teams.status==='VERIFIED')for(const team of JSON.parse(teams.text))if(Number.isInteger(team.team_id)){
+          const url=`https://api.opendota.com/api/teams/${team.team_id}/matches`;
+          sources.push(await this.source(url,`Dix rencontres récentes de ${team.name} (Dota 2)`,'OpenDota',d=>({team:team.name,matches:d.slice(0,10),limitation:'Historical team matches, not a live score for this fixture.'})));
+        }
+      }
     }else{
       const date=Date.parse(m.start_at||m.event_end_at);
       const days=[0,-1,1].map(offset=>new Date(date+offset*86400000).toISOString().slice(0,10).replace(/-/g,''));
       const prefix=m.url.split('/event/')[1]?.split('-')[0],mapping:Record<string,string>={bra:'soccer/bra.1',epl:'soccer/eng.1',lal:'soccer/esp.1',bund:'soccer/ger.1',bun:'soccer/ger.1',lig1:'soccer/fra.1',ita:'soccer/ita.1',mls:'soccer/usa.1',ucl:'soccer/uefa.champions',nba:'basketball/nba',wnba:'basketball/wnba',atp:'tennis/atp',wta:'tennis/wta'};
       const hint=mapping[prefix],leagues=hint?[hint]:m.category==='football'?['soccer/eng.1','soccer/esp.1','soccer/ger.1','soccer/fra.1','soccer/ita.1','soccer/bra.1','soccer/usa.1','soccer/uefa.champions']:m.category==='basketball'?['basketball/nba','basketball/wnba']:['tennis/atp','tennis/wta'];
       for(const league of leagues)for(const day of days){
-        const s=await this.source(`https://site.api.espn.com/apis/site/v2/sports/${league}/scoreboard?dates=${day}`,`Rencontres et informations publiques ${league}`,'ESPN',d=>(d.events||[]).filter((e:any)=>{const text=m.question+' '+(m.event_title||'')+' '+m.description.slice(0,1500)+(hint?' '+m.url:''),competitors=e.competitions?.flatMap((c:any)=>c.competitors||[])||[];return competitors.filter((t:any)=>[t.team?.displayName,t.team?.shortDisplayName,hint?t.team?.abbreviation:null,t.athlete?.displayName,t.athlete?.fullName].some(n=>nameMatches(n,text))).length>=2&&Math.abs(Date.parse(e.date)-date)<18*3600000;}).map((e:any)=>({name:e.name,date:e.date,status:e.status?.type,competitors:e.competitions?.flatMap((c:any)=>c.competitors?.map((t:any)=>({name:t.team?.displayName||t.athlete?.displayName,record:t.records,statistics:t.statistics?.slice(0,12),homeAway:t.homeAway,rank:t.curatedRank}))),links:e.links?.map((l:any)=>l.href)})).slice(0,6));
-        if(s.status==='VERIFIED')sources.push(s);
+        const s=await this.source(`https://site.api.espn.com/apis/site/v2/sports/${league}/scoreboard?dates=${day}`,`Rencontres et informations publiques ${league}`,'ESPN',d=>(d.events||[]).filter((e:any)=>{const text=m.question+' '+(m.event_title||'')+' '+m.description.slice(0,1500)+(hint?' '+m.url:''),competitors=e.competitions?.flatMap((c:any)=>c.competitors||[])||[];return competitors.filter((t:any)=>[t.team?.displayName,t.team?.shortDisplayName,hint?t.team?.abbreviation:null,t.athlete?.displayName,t.athlete?.fullName].some(n=>nameMatches(n,text))).length>=2&&Math.abs(Date.parse(e.date)-date)<18*3600000;}).map((e:any)=>sportsFacts(e)).slice(0,6));
+        sources.push(s);
       }
     }
     const seen=new Set();return sources.filter(s=>{const key=s.provider+':'+s.text;if(seen.has(key))return false;seen.add(key);return true;});

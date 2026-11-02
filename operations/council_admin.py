@@ -44,7 +44,7 @@ def deploy():
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument('command', choices=['deploy','health','state','preflight','notify-test','export','start','tick','rehearse','restore'])
+    p.add_argument('command', choices=['deploy','health','state','preflight','notify-test','export','start','tick','reconcile','rehearse','restore'])
     p.add_argument('--instance')
     p.add_argument('--test',action='store_true',help='Select the separately configured 24-hour test')
     p.add_argument('--confirm')
@@ -55,7 +55,7 @@ def main():
     if a.command == 'deploy':
         deploy();return
     c = configuration()
-    path = {'health':'/api/health','state':'/api/state','preflight':'/admin/preflight','notify-test':'/admin/notifications/test','export':'/admin/export','start':'/admin/start','tick':'/admin/tick','rehearse':'/admin/rehearsal','restore':'/admin/restore'}[a.command]
+    path = {'health':'/api/health','state':'/api/state','preflight':'/admin/preflight','notify-test':'/admin/notifications/test','export':'/admin/export','start':'/admin/start','tick':'/admin/tick','reconcile':'/admin/reconcile','rehearse':'/admin/rehearsal','restore':'/admin/restore'}[a.command]
     if a.instance and a.test:
         raise RuntimeError('Choose --test or --instance, not both')
     if a.instance and not path.startswith('/admin/'):

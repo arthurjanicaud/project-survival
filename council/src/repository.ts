@@ -46,15 +46,22 @@ export class Repository {
     return (meeting?this.rows('SELECT * FROM events WHERE meeting_id=? AND seq>? ORDER BY seq LIMIT ?',meeting,after,limit):this.rows('SELECT * FROM events WHERE seq>? ORDER BY seq LIMIT ?',after,limit)).map(r=>({...r,details:JSON.parse(r.details)}));
   }
   document(s:Source){this.run('INSERT OR IGNORE INTO documents VALUES(?,?,?,?,?,?,?)',s.id,s.url,s.title,s.text.slice(0,CONFIG.documentChars),s.fetched_at,s.provider,s.status);}
-  retrieve(query:string,limit=3):Source[]{
-    const terms=query.toLowerCase().split(/[^\p{L}\p{N}]+/u).filter(s=>s.length>=3).slice(0,6);
+  requestSource(url:string){
+    const key='source_demand:'+url,old=this.get<any>(key);
+    if(!old||Date.now()-Date.parse(old.at)>60000)this.set(key,{url,at:now()});
+  }
+  sourceDemands(){return this.rows("SELECT key,value FROM meta WHERE key LIKE 'source_demand:%'").map(r=>JSON.parse(r.value));}
+  retrieve(query:string,limit=3,history=true):Source[]{
+    const stop=new Set(['les','des','une','pour','dans','avec','sur','que','qui','par','aux','est','sont','rechercher','chercher','retrouver','données','documents','informations','disponibles','match','équipe','équipes','afin','the','and','for','from','this','that']);
+    const terms=query.toLowerCase().split(/[^\p{L}\p{N}]+/u).filter(s=>s.length>=3&&!stop.has(s)).slice(0,8);
     if(!terms.length)return [];
     const where=terms.map(()=>'(instr(lower(title),?)>0 OR instr(lower(text),?)>0)').join(' OR ');
-    const documents=this.rows(`SELECT * FROM documents WHERE status='VERIFIED' AND id NOT LIKE 'book:%' AND (${where}) ORDER BY fetched_at DESC LIMIT ?`,...terms.flatMap(t=>[t,t]),limit);
-    const history=this.rows(`SELECT * FROM events WHERE kind IN ('SPEECH','LESSON','SETTLEMENT','DECISION','ARBITRATION','MEETING_END') AND (${terms.map(()=>'(instr(lower(text),?)>0 OR instr(lower(details),?)>0)').join(' OR ')}) ORDER BY seq DESC LIMIT ?`,...terms.flatMap(t=>[t,t]),limit);
-    const past=history.map(e=>({id:'memory:'+e.seq,url:'https://project-survival.pages.dev/?phase=3'+(this.state()?.mode==='test'?'&experiment=test':'')+'&meeting='+encodeURIComponent(e.meeting_id||''),title:`Archive ${e.at} — ${e.actor} — ${e.kind}`,text:e.text+'\n'+e.details,fetched_at:e.at,provider:'Council archive',status:'VERIFIED' as const}));
+    const documents=this.rows(`SELECT * FROM documents WHERE status='VERIFIED' AND provider!='Council archive' AND id NOT LIKE 'book:%' AND (${where}) ORDER BY fetched_at DESC LIMIT 40`,...terms.flatMap(t=>[t,t]));
+    const score=(d:any)=>terms.filter(t=>(d.title+' '+d.text).toLowerCase().includes(t)).length;
+    const selected=documents.filter(d=>score(d)>=Math.min(2,terms.length)).sort((a,b)=>score(b)-score(a)||b.fetched_at.localeCompare(a.fetched_at)).slice(0,limit);
+    const past=history?this.rows(`SELECT * FROM events WHERE kind IN ('SPEECH','LESSON','SETTLEMENT','DECISION','ARBITRATION','MEETING_END') AND (${terms.map(()=>'(instr(lower(text),?)>0 OR instr(lower(details),?)>0)').join(' OR ')}) ORDER BY seq DESC LIMIT 30`,...terms.flatMap(t=>[t,t])).filter(e=>score({title:'',text:e.text+' '+e.details})>=Math.min(2,terms.length)).slice(0,limit).map(e=>({id:'memory:'+e.seq,url:'https://project-survival.pages.dev/?phase=3'+(this.state()?.mode==='test'?'&experiment=test':'')+'&meeting='+encodeURIComponent(e.meeting_id||''),title:`Archive ${e.at} — ${e.actor} — ${e.kind}`,text:e.kind+'\n'+e.text+'\n'+e.details,fetched_at:e.at,provider:'Council archive',status:'VERIFIED' as const})):[];
     for(const d of past)this.document(d);
-    return [...past.slice(0,1),...documents,...past.slice(1)].slice(0,limit);
+    return [...selected,...past].slice(0,limit);
   }
   dossier(id:string){const r=this.one('SELECT * FROM dossiers WHERE id=?',id);return r?{...r,payload:JSON.parse(r.payload)}:null;}
   market(id:string){const r=this.one('SELECT payload FROM markets WHERE id=?',id);return r?JSON.parse(r.payload):null;}
@@ -88,7 +95,7 @@ export class Repository {
     this.run('INSERT INTO ledger VALUES(?,?,?,?,?)',id+':buy',now(),'BUY',D(e.spent).neg().toFixed(),id);
     const proof=this.proof(m.books[p.side]);
     const probability=this.dossier(m.id)?.payload?.analysis?.estimated_yes_probability??null;
-    const position={proposal:p,question:m.question,url:m.url,category:m.category,end_at:m.event_end_at,estimated_yes_probability:probability,expected_edge_per_share:probability===null?null:D(p.side==='YES'?probability:D(1).minus(probability)).minus(D(e.spent).div(e.quantity)).toFixed(),reason,fees:e.fees,market_version:m.version,book_proof:proof,outcome_label:m.outcome_labels?.[p.side]||p.side};
+    const position={proposal:p,question:m.question,url:m.url,category:m.category,end_at:m.event_end_at,estimated_yes_probability:probability,expected_edge_per_share:probability===null?null:D(p.side==='YES'?probability:D(1).minus(probability)).minus(D(e.spent).div(e.quantity)).toFixed(),reason,fees:e.fees,market_version:m.version,event_group:m.group,initial_estimated_yes_probability:probability,council_estimated_yes_probability:p.estimated_yes_probability??null,book_proof:proof,outcome_label:m.outcome_labels?.[p.side]||p.side};
     this.run("INSERT INTO positions VALUES(?,?,?,'PENDING',?,?,?,?)",id,m.id,p.side,e.spent,e.quantity,now(),JSON.stringify(position));
     e.fills.forEach((f,i)=>this.run('INSERT INTO fills VALUES(?,?,?,?,?,?,?)',`${id}:${i}`,id,m.assets[p.side],m.books[p.side].evidence,f.price,f.quantity,f.fee));
     const fx=this.state()?.fx?.usd_per_eur;
@@ -102,11 +109,18 @@ export class Repository {
     if(!m.resolved||!m.payouts||Object.keys(m.payouts).sort().join(',')!=='NO,YES'||!D(m.payouts.YES).plus(m.payouts.NO).eq(1)||Object.values(m.payouts).some(v=>D(String(v)).lt(0)||D(String(v)).gt(1)))throw Error('UNVERIFIED_RESOLUTION');
     const payout=D(current.quantity).mul(m.payouts[current.outcome]);
     const payload=JSON.parse(current.payload);const prob=payload.estimated_yes_probability;
+    const forecasts=new Map<string,any>();
+    for(const e of this.events(0,payload.proposal.meeting_id,300)){
+      const v=e.details?.estimated_yes_probability;
+      if(e.kind==='SPEECH'&&typeof v==='number'&&v>=0&&v<=1&&(e.details.market_id===m.id||e.id.startsWith(payload.proposal.id+':v')||e.details.proposal?.market_id===m.id))forecasts.set(e.actor,{actor:e.actor,probability:v,at:e.at,brier_score:['0','1'].includes(D(m.payouts.YES).toFixed())?D(v).minus(m.payouts.YES).pow(2).toFixed():null});
+    }
+    payload.forecast_scores=[...forecasts.values()];payload.official_resolved_at=m.resolution_evidence?.resolved_at||null;
+    payload.council_brier_score=payload.council_estimated_yes_probability==null||!['0','1'].includes(D(m.payouts.YES).toFixed())?null:D(payload.council_estimated_yes_probability).minus(m.payouts.YES).pow(2).toFixed();
     Object.assign(payload,{payout:payout.toFixed(),profit:payout.minus(current.cost).toFixed(),settled_at:now(),resolution_evidence:m.resolution_evidence,brier_score:prob===null||!['0','1'].includes(D(m.payouts.YES).toFixed())?null:D(prob).minus(m.payouts.YES).pow(2).toFixed(),ex_ante_review:'La qualité initiale dépend des sources et probabilités disponibles ; le résultat seul ne valide ni n’invalide la décision.'});
     this.run('INSERT INTO ledger VALUES(?,?,?,?,?)',current.id+':settle',now(),'SETTLEMENT',payout.toFixed(),current.id);
     this.run("UPDATE positions SET status='SETTLED',payload=? WHERE id=?",JSON.stringify(payload),current.id);
     this.event(current.id+':settled','SETTLEMENT',`Pari réglé : ${payout.toFixed()} unités récupérées.`,'SECRETARY',payload.proposal.meeting_id,{position_id:current.id,profit:payload.profit,payout:payload.payout,question:payload.question});
-    this.event(current.id+':lesson','LESSON',`Retour factuel sur « ${payload.question} » : résultat net ${payload.profit} unités. Probabilité OUI annoncée : ${prob===null?'inconnue':prob}. Score de Brier : ${payload.brier_score??'non calculable'}. Une issue favorable ne suffit pas à prouver une bonne prévision.`,'SECRETARY',payload.proposal.meeting_id,{category:payload.category,estimated_yes_probability:prob,result:m.payouts,brier_score:payload.brier_score,expected_edge_at_purchase:payload.expected_edge_per_share,ex_ante_review:payload.ex_ante_review});
+    this.event(current.id+':lesson','LESSON',`Retour factuel sur « ${payload.question} » : résultat net ${payload.profit} unités. Probabilité OUI annoncée : ${prob===null?'inconnue':prob}. Score de Brier : ${payload.brier_score??'non calculable'}. Une issue favorable ne suffit pas à prouver une bonne prévision.`,'SECRETARY',payload.proposal.meeting_id,{category:payload.category,estimated_yes_probability:prob,result:m.payouts,brier_score:payload.brier_score,forecast_scores:payload.forecast_scores,council_brier_score:payload.council_brier_score,expected_edge_at_purchase:payload.expected_edge_per_share,ex_ante_review:payload.ex_ante_review});
     return true;
   });}
   notify(id:string,title:string,message:string,url:string,priority=3){if(this.state()?.mode==='test'){title='[TEST 24H] '+title;const link=new URL(url);link.searchParams.set('experiment','test');url=link.href;}this.run("INSERT OR IGNORE INTO notifications VALUES(?,?,'PENDING',0,?,NULL)",id,now(),JSON.stringify({title,message,url,priority}));this.enqueue('notify:'+id,'NOTIFY',{id});}

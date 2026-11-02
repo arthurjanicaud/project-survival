@@ -7,7 +7,7 @@ export function report(repo:Repository,s:State){
   const positions=repo.rows('SELECT * FROM positions ORDER BY created_at').map(p=>({...p,payload:JSON.parse(p.payload)}));
   const meetings=repo.rows('SELECT * FROM meetings').map(m=>({...m,payload:JSON.parse(m.payload)}));
   const ordinary=meetings.filter(m=>m.kind==='ORDINARY'),held=ordinary.filter(m=>m.status==='COMPLETED');
-  const expectedMeetings=nextSlots(s.started_at!,s.end_at,40).length;
+  const scheduled=nextSlots(s.started_at!,s.end_at,40),expectedMeetings=scheduled.filter(slot=>Date.parse(slot)<Date.parse(s.betting_deadline!)).length;
   const jobs=repo.rows('SELECT id,kind,status FROM jobs'),cycles=new Map<number,Map<string,string>>();
   for(const j of jobs){const match=j.id.match(/^(scan|settle):(\d+)(?::(.+))?$/);if(!match)continue;const bucket=Number(match[2]);if(!cycles.has(bucket))cycles.set(bucket,new Map());cycles.get(bucket)!.set(j.kind==='SETTLE'?'settle':match[3],j.status);}
   const period=CONFIG.scanMinutes*60000,first=Math.floor(Date.parse(s.started_at!)/period),last=Math.floor((Date.parse(s.end_at!)-1)/period);let complete=0,missing=0;
@@ -21,7 +21,7 @@ export function report(repo:Repository,s:State){
   const calls=repo.rows("SELECT * FROM calls WHERE id NOT LIKE '%:result' AND created_at>=?",s.started_at!),cost=calls.reduce((n,c)=>{if(c.estimated_eur){const x=JSON.parse(c.estimated_eur);n.min=n.min.plus(x.min);n.max=n.max.plus(x.max);}return n;},{min:D(0),max:D(0)});
   return {experiment_id:s.id,mode:s.mode,started_at:s.started_at,end_at:s.end_at,finished_at:new Date().toISOString(),initial_eur:s.initial_eur,final_eur:cash.toFixed(),profit_eur:cash.minus(initial).toFixed(),roi_percent:cash.minus(initial).div(initial).mul(100).toFixed(),fx:s.fx,
     positions:positions.length,pending_positions:positions.filter(p=>p.status!=='SETTLED').length,max_realized_drawdown_percent:drawdown.mul(100).toFixed(),categories,
-    meetings:{expected:expectedMeetings,completed:held.length,no_agenda:ordinary.filter(m=>m.status==='NO_AGENDA').length,cancelled:ordinary.filter(m=>m.status==='CANCELLED').length,completion_percent:expectedMeetings?D(held.length).div(expectedMeetings).mul(100).toFixed():null,within_five_minutes:held.filter(m=>Date.parse(m.started_at)-Date.parse(m.slot)<=300000).length,extraordinary:meetings.filter(m=>m.kind==='EXTRAORDINARY'&&m.status==='COMPLETED').length},
+    meetings:{scheduled_total:scheduled.length,post_window_bulletins:ordinary.filter(m=>Date.parse(m.slot)>=Date.parse(s.betting_deadline!)&&m.status==='NO_AGENDA').length,expected:expectedMeetings,completed:held.length,no_agenda:ordinary.filter(m=>m.status==='NO_AGENDA'&&Date.parse(m.slot)<Date.parse(s.betting_deadline!)).length,cancelled:ordinary.filter(m=>m.status==='CANCELLED').length,completion_percent:expectedMeetings?D(held.length).div(expectedMeetings).mul(100).toFixed():null,within_five_minutes:held.filter(m=>Date.parse(m.started_at)-Date.parse(m.slot)<=300000).length,extraordinary:meetings.filter(m=>m.kind==='EXTRAORDINARY'&&m.status==='COMPLETED').length},
     technical_cycles:{expected:complete+missing,complete,incomplete_or_missing:missing,success_percent:D(complete).div(complete+missing||1).mul(100).toFixed()},
     specialist_participation:MEMBERS.filter(m=>'category' in m).map(m=>({id:m.id,name:m.name,analyses:repo.one("SELECT count(*) n FROM events WHERE actor=? AND kind='ANALYSIS' AND at>=?",m.id,s.started_at)?.n||0})),
     serious_dossiers:repo.one('SELECT count(DISTINCT market_id) n FROM proposals')?.n||0,

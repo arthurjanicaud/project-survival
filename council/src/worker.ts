@@ -4,6 +4,7 @@ import {Engine} from './engine';
 import {CONFIG,now,type Env} from './domain';
 import {D} from './finance';
 import {boardTarget} from './routing';
+import {Markets} from './markets';
 
 const json=(v:unknown,status=200)=>Response.json(v,{status,headers:{'Cache-Control':'no-store'}});
 async function authorized(r:Request,env:Env){
@@ -49,6 +50,10 @@ export class Council extends DurableObject<Env>{
         const s=await this.engine.start();await this.arm();return json(s);
       }
       if(path==='/admin/tick'&&r.method==='POST'){this.engine.tick();await this.arm();return json({ok:true});}
+      if(path==='/admin/reconcile'&&r.method==='POST'){
+        if(!this.repo.state()?.started_at)throw Error('EXPERIMENT_NOT_STARTED');
+        this.engine.expireDossiers();this.repo.enqueue('manual-reconcile:'+now(),'SETTLE',{});await this.arm();return json({queued:true});
+      }
       if(path==='/admin/retry-analyses'&&r.method==='POST'){
         if(this.repo.state()?.mode!=='test'||this.repo.state()?.status!=='RUNNING')throw Error('RUNNING_TEST_REQUIRED');
         const failed=this.repo.rows("SELECT id FROM dossiers WHERE status='TECHNICAL_ERROR' ORDER BY updated_at LIMIT 20"),at=now();
@@ -57,9 +62,14 @@ export class Council extends DurableObject<Env>{
         await this.arm();return json({queued:failed.length});
       }
       if(path==='/admin/export')return json(this.repo.export());
+      if(path==='/admin/resolution-check'){
+        const id=u.searchParams.get('market_id')||'';if(!/^\d+$/.test(id))throw Error('VALID_MARKET_ID_REQUIRED');
+        return json(await new Markets(this.repo).resolutionDiagnostic(id));
+      }
       if(path==='/admin/validation-packet'){
         const m=await this.engine.markets.inspect(u.searchParams.get('market_id')||'');this.repo.putMarket(m);
-        return json({market:m,sources:await this.engine.markets.evidence(m)});
+        const sources=await this.engine.markets.evidence(m),research=sources.filter(s=>['ESPN','OpenDota'].includes(s.provider)).map(s=>({url:s.url,...this.repo.cache<any>('research:'+s.url)})).filter(r=>r.data);
+        return json({market:m,sources,research});
       }
       if(path==='/admin/rehearsal'&&r.method==='POST'){
         if(this.repo.state()!.mode!=='validation'||this.repo.state()!.status!=='READY')throw Error('EMPTY_VALIDATION_INSTANCE_REQUIRED');
@@ -70,6 +80,7 @@ export class Council extends DurableObject<Env>{
         const fx=await this.engine.markets.fx(),s=this.repo.state()!;s.fx=fx;s.started_at=now();s.end_at=new Date(Date.now()+168*3600000).toISOString();s.betting_deadline=new Date(Date.parse(s.end_at)-6*3600000).toISOString();s.status='RUNNING';
         this.repo.atomic(()=>{this.repo.save(s);this.repo.run('INSERT INTO ledger VALUES(?,?,?,?,?)',s.id+':initial',now(),'INITIAL',D(s.initial_eur).mul(fx.usd_per_eur).toFixed(),s.id);});
         this.repo.putMarket(p.market);for(const source of p.sources)this.repo.document(source);
+        for(const feed of p.research||[])this.repo.putCache('research:'+feed.url,{fetched_at:feed.fetched_at,data:feed.data},Math.max(1,Math.floor((3600000-(Date.now()-Date.parse(feed.fetched_at)))/1000)));
         this.repo.putDossier({id:p.market.id,market_id:p.market.id,category:p.market.category,status:'PENDING',priority:60,hash:'rehearsal:'+now(),payload:{source_ids:p.sources.filter((s:any)=>s.status==='VERIFIED').map((s:any)=>s.id)}});
         this.repo.enqueue(s.id+':rehearsal','REHEARSAL',{id:p.market.id});await this.arm();return json({queued:true,mode:'validation',production_started:false,instance:s.id});
       }
@@ -77,10 +88,11 @@ export class Council extends DurableObject<Env>{
         const b:any=await r.json(),url=new URL(b.url),age=Date.now()-Date.parse(b.fetched_at);
         if(!['site.api.espn.com','api.opendota.com'].includes(url.hostname)||url.protocol!=='https:'||url.username||url.password||age< -5000||age>3600000||JSON.stringify(b.data).length>4000000)throw Error('INVALID_RESEARCH_FEED');
         if(url.hostname==='site.api.espn.com'&&!/^\/apis\/site\/v2\/sports\/(basketball|soccer|tennis)\/[a-z0-9.]+\/scoreboard$/.test(url.pathname))throw Error('INVALID_RESEARCH_PATH');
-        if(url.hostname==='api.opendota.com'&&url.pathname!=='/api/teams')throw Error('INVALID_RESEARCH_PATH');
+        if(url.hostname==='api.opendota.com'&&!/^\/api\/teams(?:\/\d+\/matches)?$/.test(url.pathname))throw Error('INVALID_RESEARCH_PATH');
         this.repo.putCache('research:'+url.href,{fetched_at:b.fetched_at,data:b.data},Math.max(1,Math.floor((3600000-age)/1000)));
-        this.repo.set('research_collector',{at:now(),last_source:url.hostname,last_fetched_at:b.fetched_at});return json({accepted:true});
+        const old=this.repo.get<any>('research_collector')||{};this.repo.set('research_collector',{at:now(),last_source:url.hostname,last_fetched_at:b.fetched_at,full_at:b.batch_kind==='full'?now():old.full_at||null,opendota_at:url.hostname==='api.opendota.com'?now():old.opendota_at||null});this.repo.run('DELETE FROM meta WHERE key=?','source_demand:'+url.href);return json({accepted:true});
       }
+      if(path==='/admin/research-demands')return json({requests:this.repo.sourceDemands()});
       if(path==='/admin/notification-outbox')return json({notifications:this.repo.rows("SELECT id,payload FROM notifications WHERE status='PENDING' ORDER BY created_at LIMIT 20").map(n=>({id:n.id,...JSON.parse(n.payload)})),topic:this.env.NTFY_TOPIC});
       if(path==='/admin/notification-ack'&&r.method==='POST'){const b:any=await r.json();if(typeof b.id!=='string')throw Error('INVALID_ID');const row=this.repo.one('SELECT payload FROM notifications WHERE id=?',b.id);if(row){const p=JSON.parse(row.payload);p.sent_at=now();p.delivery='github-relay';this.repo.run("UPDATE notifications SET status='SENT',payload=?,error=NULL WHERE id=?",JSON.stringify(p),b.id);}return json({ok:true});}
       if(path==='/admin/notifications/test'&&r.method==='POST'){
@@ -131,7 +143,7 @@ export class Council extends DurableObject<Env>{
       }
     }catch(e){
       const code=this.engine.errorCode(e);
-      if(job&&['MEETING_BUSY','MEETING_PENDING_DOSSIERS'].includes(code)){this.repo.retry(job,code,15);return;}
+      if(job&&['MEETING_BUSY','MEETING_PENDING_DOSSIERS','MEETING_DATA_PENDING'].includes(code)){this.repo.retry(job,code,15);return;}
       const h=this.repo.get<any>('health')||{successful:0,failed:0};h.failed++;h.last_failure={at:now(),code,job:job?.kind};this.repo.set('health',h);
       if(job){
         const circuit=this.repo.get<any>('azure_circuit'),recoveryWait=circuit?.open_until?Math.max(0,(Date.parse(circuit.open_until)-Date.now())/1000)+1:0;
@@ -173,6 +185,12 @@ export default {
       const h=new Headers(headers);h.set('x-board-id',env.TEST_EXPERIMENT_ID!);h.set('x-board-mode','test');
       const shared=await env.COUNCIL.get(env.COUNCIL.idFromName(env.TEST_EXPERIMENT_ID!)).fetch(new Request(mirror,{headers:h}));
       if(!shared.ok)return json({error:'TEST_RESEARCH_DELIVERY_FAILED'},502);await shared.body?.cancel();
+    }
+    if(response.ok&&admin&&u.pathname==='/admin/research-demands'&&target.id===env.EXPERIMENT_ID&&env.TEST_EXPERIMENT_ID){
+      const body:any=await response.json(),h=new Headers(headers);h.set('x-board-id',env.TEST_EXPERIMENT_ID);h.set('x-board-mode','test');
+      const extra=await env.COUNCIL.get(env.COUNCIL.idFromName(env.TEST_EXPERIMENT_ID)).fetch(new Request(r.url,{headers:h}));
+      if(extra.ok){const b:any=await extra.json();body.requests=[...new Map([...body.requests,...b.requests].map((d:any)=>[d.url,d])).values()];}
+      response=json(body);
     }
     if(response.ok&&admin&&u.pathname==='/admin/notification-outbox'&&target.id===env.EXPERIMENT_ID&&env.TEST_EXPERIMENT_ID){
       const body:any=await response.json(),h=new Headers(headers);h.set('x-board-id',env.TEST_EXPERIMENT_ID);h.set('x-board-mode','test');

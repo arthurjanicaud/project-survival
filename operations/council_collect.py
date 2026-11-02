@@ -17,7 +17,7 @@ def configuration():
     return {**dotenv_values(ROOT/'.env'),**os.environ}
 def compact_espn(d):
     def competition(c):
-        return {k:c[k] for k in ['id','date','status','competitors','notes'] if k in c}
+        return {k:c[k] for k in ['id','date','status','competitors','notes','venue','format','type','situation'] if k in c}
     def competitor(c):
         return {k:c[k] for k in ['id','type','homeAway','team','athlete','records','curatedRank','statistics','score'] if k in c}
     events=[]
@@ -29,7 +29,7 @@ def compact_espn(d):
                 for key in ['team','athlete']:
                     if key in t:t[key]={k:v for k,v in t[key].items() if k in ['id','displayName','shortDisplayName','fullName','abbreviation']}
             names=[t.get('team',t.get('athlete',{})).get('displayName','') for t in x['competitors']]
-            events.append({'id':e.get('id'),'name':' vs '.join(names) or e.get('name'),'date':c.get('date',e.get('date')),'status':c.get('status',e.get('status')),'competitions':[x],'links':e.get('links',[])})
+            events.append({'id':e.get('id'),'name':' vs '.join(names) or e.get('name'),'date':c.get('date',e.get('date')),'status':c.get('status',e.get('status')),'competitions':[x],'links':e.get('links',[]),'season':e.get('season'),'tournament':e.get('shortName')})
     return {'events':events,'collector_method':'ESPN public scoreboard, compacted without invented values'}
 def research(force=False):
     cfg=configuration();api=cfg['COUNCIL_API_URL'];headers={'Authorization':'Bearer '+cfg['COUNCIL_ADMIN_TOKEN']}
@@ -37,26 +37,45 @@ def research(force=False):
     test_response=httpx.get(api+'/api/health',params={'experiment':'test'},timeout=30)
     runs=[health]+([test_response.json()] if test_response.is_success else [])
     active=[r for r in runs if r['state']['status'] not in ['FINISHED','CLOSING']]
-    if not active:
+    demand_response=httpx.get(api+'/admin/research-demands',headers=headers,timeout=30);demand_response.raise_for_status()
+    demands=demand_response.json().get('requests',[])
+    if not active and not demands:
         print(json.dumps({'research':'inactive_experiment'}));return
     def recent(run):
         previous=run.get('research_collector',{}) or {}
-        return previous.get('at') and (datetime.now(timezone.utc)-datetime.fromisoformat(previous['at'].replace('Z','+00:00'))).total_seconds()<1500
-    if not force and all(recent(run) for run in active):
+        return previous.get('at') and (datetime.now(timezone.utc)-datetime.fromisoformat(previous['at'].replace('Z','+00:00'))).total_seconds()<600
+    if not force and not demands and all(recent(run) for run in active):
         print(json.dumps({'research':'recent_shared_feed_reused'}));return
     leagues=['basketball/nba','basketball/wnba','soccer/eng.1','soccer/esp.1','soccer/ger.1','soccer/fra.1','soccer/ita.1','soccer/bra.1','soccer/usa.1','soccer/uefa.champions','tennis/atp','tennis/wta']
-    urls=['https://api.opendota.com/api/teams']
-    for day in range(-1,8):
+    today=datetime.now(timezone.utc).date()
+    full=force or any(not r.get('research_collector',{} ) or not (r.get('research_collector') or {}).get('full_at') or datetime.fromisoformat(r['research_collector']['full_at'].replace('Z','+00:00')).date()!=today for r in active)
+    urls=['https://api.opendota.com/api/teams'] if full or not all(recent(r) for r in active) else []
+    for day in (range(-1,8) if full else [0,1] if not all(recent(r) for r in active) else []):
         stamp=(datetime.now(timezone.utc)+timedelta(days=day)).strftime('%Y%m%d')
         urls.extend(f'https://site.api.espn.com/apis/site/v2/sports/{league}/scoreboard?dates={stamp}' for league in leagues)
+    from urllib.parse import urlparse
+    dota=0
+    for demand in sorted(demands,key=lambda d:d['at']):
+        url=demand['url'];host=urlparse(url).hostname
+        if host not in ['site.api.espn.com','api.opendota.com']:continue
+        if host=='api.opendota.com' and '/matches' in url:
+            if dota>=6:continue
+            dota+=1
+        urls.append(url)
+    dota_times=[(r.get('research_collector') or {}).get('opendota_at') for r in runs]
+    recent_dota=any(v and (datetime.now(timezone.utc)-datetime.fromisoformat(v.replace('Z','+00:00'))).total_seconds()<600 for v in dota_times)
+    if recent_dota:urls=[u for u in urls if urlparse(u).hostname!='api.opendota.com']
+    urls=list(dict.fromkeys(urls))
     results=[]
     with httpx.Client(timeout=40,follow_redirects=False) as client:
         def collect(url):
             r=client.get(url,headers={'User-Agent':'ProjectSurvival/3.0 public-research'});r.raise_for_status()
             data=r.json();fetched=datetime.now(timezone.utc).isoformat()
             if 'espn.com' in url:data=compact_espn(data)
-            elif isinstance(data,list):data=[{k:t.get(k) for k in ['team_id','name','rating','wins','losses','last_match_time']} for t in data]
-            out=client.post(api+'/admin/research',headers=headers,json={'url':url,'data':data,'fetched_at':fetched});out.raise_for_status()
+            elif isinstance(data,list):
+                fields=['match_id','radiant_win','radiant','opposing_team_id','opposing_team_name','start_time','duration','leagueid'] if '/matches' in url else ['team_id','name','rating','wins','losses','last_match_time']
+                data=[{k:t.get(k) for k in fields} for t in (data[:10] if '/matches' in url else data)]
+            out=client.post(api+'/admin/research',headers=headers,json={'url':url,'data':data,'fetched_at':fetched,'batch_kind':'full' if full else 'targeted'});out.raise_for_status()
             return {'url':url,'status':'OK','items':len(data.get('events',[])) if isinstance(data,dict) else len(data),'bytes':len(json.dumps(data))}
         with ThreadPoolExecutor(max_workers=3) as pool:
             futures={pool.submit(collect,url):url for url in urls}
