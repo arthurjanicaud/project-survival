@@ -5,6 +5,7 @@ import {CONFIG,now,type Env} from './domain';
 import {D} from './finance';
 import {boardTarget} from './routing';
 import {Markets} from './markets';
+import {nextAlarm} from './scheduling';
 
 const json=(v:unknown,status=200)=>Response.json(v,{status,headers:{'Cache-Control':'no-store'}});
 async function authorized(r:Request,env:Env){
@@ -33,7 +34,7 @@ export class Council extends DurableObject<Env>{
         if(r.headers.get('Upgrade')?.toLowerCase()!=='websocket')return json({error:'WEBSOCKET_REQUIRED'},426);
         const pair=new WebSocketPair();this.ctx.acceptWebSocket(pair[1]);return new Response(null,{status:101,webSocket:pair[0]});
       }
-      if(path==='/api/health')return json({state:this.repo.state(),health:this.repo.get('health'),research_collector:this.repo.get('research_collector'),storage_bytes:this.ctx.storage.sql.databaseSize});
+      if(path==='/api/health')return json({state:this.repo.state(),health:this.repo.get('health'),research_collector:this.repo.get('research_collector'),storage_bytes:this.ctx.storage.sql.databaseSize,scheduler:{alarm_at:await this.ctx.storage.getAlarm(),processing:this.processing}});
       if(path==='/api/state'){const reads=this.repo.reads,writes=this.repo.writes,out=json(this.engine.summary());out.headers.set('X-Survival-SQL-Reads',String(this.repo.reads-reads));out.headers.set('X-Survival-SQL-Writes',String(this.repo.writes-writes));return out;}
       if(path==='/api/events')return json({events:this.repo.events(Math.max(0,Number(u.searchParams.get('after'))||0),u.searchParams.get('meeting')||undefined,100)});
       if(path==='/api/meeting')return json({meeting:this.repo.meeting(u.searchParams.get('id')||''),events:this.repo.events(0,u.searchParams.get('id')||'',300)});
@@ -118,7 +119,7 @@ export class Council extends DurableObject<Env>{
   async arm(){
     if(this.repo.get('recovery_readonly'))return;
     const j=this.repo.one("SELECT min(CASE WHEN status='RUNNING' THEN lease_until ELSE due_at END) at FROM jobs WHERE status IN ('PENDING','RUNNING')");
-    if(j?.at){const due=Math.max(Date.now()+100,Date.parse(j.at));const old=await this.ctx.storage.getAlarm();if(!old||old>due)await this.ctx.storage.setAlarm(due);}
+    if(j?.at){const old=await this.ctx.storage.getAlarm(),due=nextAlarm(old,Date.parse(j.at),Date.now(),this.processing);if(due!==null){await this.ctx.storage.setAlarm(due);if(old!==null&&old<Date.now()-5000)this.repo.event('alarm-recovery:'+old,'RECOVERY','Le contrôle périodique a réarmé un réveil technique périmé. Les tâches reprennent sans réinitialiser le portefeuille.','SECRETARY',null,{previous_alarm_at:new Date(old).toISOString(),new_alarm_at:new Date(due).toISOString()});}}
   }
   async alarm(){
     if(this.repo.get('recovery_readonly')){await this.ctx.storage.deleteAlarm();return;}

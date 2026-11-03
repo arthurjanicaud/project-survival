@@ -107,13 +107,15 @@ export function normalize(raw:any,category:Category,at=now()):Market{
     liquidity:String(raw.liquidityNum||raw.liquidity||'0'),volume:String(raw.volume24hr||'0'),books:{},delay_seconds:Number(raw.secondsDelay||0),observed_at:at,
     tags:(raw.tags||[]).map((t:any)=>String(t.label||t.slug)),};
 }
+function resolutionTimestamp(value:any){const n=Number(value),at=typeof value==='string'&&!Number.isFinite(n)?Date.parse(value):n*1000;return Number.isFinite(at)&&at>0?new Date(at).toISOString():null;}
 export function finalResolution(raw:any,rows:any[]):{YES:string;NO:string;evidence:any}|null{
   for(const r of rows){
     if(r.status!=='resolved')continue;
     const condition=r.conditionId||r.condition_id,question=r.questionId||r.question_id;
     if(!((condition&&condition===(raw.conditionId||raw.condition_id))||(question&&question===(raw.questionID||raw.questionId||raw.question_id))))continue;
     if(r.conditionId||r.condition_id){if((r.conditionId||r.condition_id)!==(raw.conditionId||raw.condition_id))continue;}
-    if((r.questionId||r.question_id)&&(raw.questionID||raw.questionId||raw.question_id)&&(r.questionId||r.question_id)!==(raw.questionID||raw.questionId||raw.question_id))continue;
+    // A rules update changes the oracle question ID, but never the market condition ID.
+    if((r.questionId||r.question_id)&&(raw.questionID||raw.questionId||raw.question_id)&&(r.questionId||r.question_id)!==(raw.questionID||raw.questionId||raw.question_id)&&!(r.new_version_q===true&&condition&&condition===(raw.conditionId||raw.condition_id)))continue;
     // Data API wire payouts are micro-USDC (e6), unlike the SDK's parsed
     // Decimal payouts. Never confuse the two or infer a payout from a price.
     const payouts=arr(r.payouts),resolvedAt=r.resolvedAt||r.resolved_at;
@@ -124,7 +126,7 @@ export function finalResolution(raw:any,rows:any[]):{YES:string;NO:string;eviden
     }
     if((raw.version||'v1')==='v1'&&raw.umaResolutionStatus==='resolved'&&(r.transactionHash||r.transaction_hash)){
       const oracle=String(r.price),prices=arr(raw.outcomePrices);const values:Record<string,string[]>={'0':['0','1'],'500000000000000000':['0.5','0.5'],'1000000000000000000':['1','0']};
-      const v=values[oracle];if(v&&prices.length===2&&D(prices[0]).eq(v[0])&&D(prices[1]).eq(v[1]))return {YES:v[0],NO:v[1],evidence:{method:'Final UMA price corroborated by Gamma outcomes',transaction_hash:r.transactionHash||r.transaction_hash,observed_at:now()}};
+      const v=values[oracle];if(v&&prices.length===2&&D(prices[0]).eq(v[0])&&D(prices[1]).eq(v[1]))return {YES:v[0],NO:v[1],evidence:{method:'Final UMA price corroborated by Gamma outcomes',transaction_hash:r.transactionHash||r.transaction_hash,condition_id:condition,question_id:question||null,question_rules_updated:r.new_version_q===true,resolved_at:resolutionTimestamp(r.resolved_at||r.last_update_timestamp),observed_at:now()}};
     }
   }return null;
 }

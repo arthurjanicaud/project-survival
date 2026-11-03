@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {z} from 'zod';
 import {Engine} from '../src/engine';
 import {boundedContext} from '../src/azure';
+import {nextAlarm} from '../src/scheduling';
 import {finalResolution,ensembleSummary,sportsFacts} from '../src/markets';
 import {factualText,needsReview,sourceFreshness} from '../src/research';
 import {execute} from '../src/finance';
@@ -91,4 +92,39 @@ test('sports packets preserve both opponents, typed records, actual scores and c
 test('context packing keeps complete category exposure and names the correlated positions',()=>{
  const positions=Array.from({length:80},(_,i)=>({market_id:'m'+i,status:'PENDING',cost:'10',quantity:'20',outcome:'YES',payload:{question:'A factual market '+i,category:'football',event_group:i===79?'target':'other'}}));
  const packed=boundedContext({market:{group:'target',description:'rules'},positions});assert.equal(packed.exposure_by_category.football.count,80);assert.equal(packed.exposure_by_category.football.cost,'800');assert.equal(packed.positions[0].question,'A factual market 79');
+});
+
+
+test('final UMA rules-update question is accepted only with matching condition, final price and transaction',()=>{
+ const raw={version:'v1',conditionId:'same-condition',questionID:'original-question',umaResolutionStatus:'resolved',outcomePrices:['1','0']};
+ const row={condition_id:'same-condition',question_id:'updated-question',status:'resolved',new_version_q:true,price:'1000000000000000000',transaction_hash:'tx',last_update_timestamp:'1793674344'};
+ const result=finalResolution(raw,[row]);assert.equal(result?.YES,'1');assert.equal(result?.evidence.resolved_at,'2026-11-03T02:52:24.000Z');
+ for(const r of [{...row,new_version_q:false},{...row,condition_id:'wrong-condition'},{...row,status:'posed'},{...row,transaction_hash:''},{...row,price:'69'}])assert.equal(finalResolution(raw,[r]),null);
+ assert.equal(finalResolution({...raw,outcomePrices:['0','1']},[row]),null);
+});
+
+test('cron repairs an overdue alarm without interrupting an active leased job',()=>{
+ const at=Date.now();assert.equal(nextAlarm(at-3600000,at-10000,at),at+100);
+ assert.equal(nextAlarm(null,at-10000,at),at+100);assert.equal(nextAlarm(at+2000,at+10000,at),null);
+ assert.equal(nextAlarm(at-3600000,at-10000,at,true),null);assert.equal(nextAlarm(null,NaN,at),null);
+});
+
+test('outage recovery coalesces polls but preserves meetings, analyses and every funds batch',()=>{
+ const r=repository(),at=new Date().toISOString(),old=new Date(Date.now()-3600000).toISOString();
+ for(const t of [old,at]){for(const category of ['weather','football'])r.enqueue('scan:'+category+':'+t,'SCAN',{category},t);r.enqueue('settle:'+t,'SETTLE',{},t);for(const ids of [['a'],['b']])r.enqueue('funds:'+ids[0]+':'+t,'SETTLE_FUNDS',{ids},t);}
+ r.enqueue('meeting','MEETING',{id:'meeting'},old);r.enqueue('analysis','ANALYZE',{id:'market'},old);r.coalescePeriodic(at);
+ assert.equal(r.one("SELECT count(*) n FROM jobs WHERE status='PENDING' AND kind='SCAN'").n,2);
+ assert.equal(r.one("SELECT count(*) n FROM jobs WHERE status='PENDING' AND kind='SETTLE_FUNDS'").n,2);
+ assert.equal(r.one("SELECT status FROM jobs WHERE id='meeting'").status,'PENDING');assert.equal(r.one("SELECT status FROM jobs WHERE id='analysis'").status,'PENDING');assert.ok(['SETTLE','SETTLE_FUNDS'].includes(r.claim(at)?.kind));
+});
+
+
+test('large historical meeting prose is packed without changing the proposal or hiding total exposure',()=>{
+ const proposal={market_id:'m',amount:'120',side:'YES',max_price:'.4',version:3};
+ const c=boundedContext({market:{description:'rules '.repeat(1500),group:'same'},proposal,
+ sources:Array.from({length:5},(_,i)=>({id:String(i),text:'verified fact '.repeat(150)})),
+ memory:Array.from({length:5},()=>({kind:'LESSON',text:'historic explanation '.repeat(180),details:{result:{YES:'1',NO:'0'},long_unused_archive:'x'.repeat(4000)}})),
+ history:Array.from({length:8},(_,i)=>({actor:'QUANT',kind:'SPEECH',text:'past reasoning '.repeat(250)})),
+ positions:Array.from({length:25},(_,i)=>({market_id:String(i),status:'PENDING',cost:'10',quantity:'20',payload:{category:'weather',event_group:'same',question:'Named weather event '+i}}))});
+ assert.ok(JSON.stringify(c).length<=26000);assert.deepEqual(c.proposal,proposal);assert.equal(c.exposure_by_category.weather.cost,'250');assert.equal(c.memory[0].details.result.YES,'1');
 });

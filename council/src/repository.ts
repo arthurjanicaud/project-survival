@@ -27,9 +27,11 @@ export class Repository {
     'CREATE TABLE IF NOT EXISTS counterfactuals(id TEXT PRIMARY KEY,market_id TEXT NOT NULL,status TEXT NOT NULL,payload TEXT NOT NULL)',
     'CREATE TABLE IF NOT EXISTS jobs(id TEXT PRIMARY KEY,kind TEXT NOT NULL,due_at TEXT NOT NULL,status TEXT NOT NULL,lease_until TEXT,payload TEXT NOT NULL,attempt INTEGER NOT NULL DEFAULT 0,error TEXT)',
     'CREATE INDEX IF NOT EXISTS jobs_due ON jobs(status,due_at)',
+    'CREATE INDEX IF NOT EXISTS jobs_lease ON jobs(status,lease_until)',
     'CREATE TABLE IF NOT EXISTS calls(id TEXT PRIMARY KEY,actor TEXT NOT NULL,meeting_id TEXT,created_at TEXT NOT NULL,status TEXT NOT NULL,input_tokens INTEGER NOT NULL DEFAULT 0,output_tokens INTEGER NOT NULL DEFAULT 0,cached_tokens INTEGER NOT NULL DEFAULT 0,cache_write_tokens INTEGER NOT NULL DEFAULT 0,estimated_eur TEXT,result TEXT,error TEXT)',
     'CREATE TABLE IF NOT EXISTS notifications(id TEXT PRIMARY KEY,created_at TEXT NOT NULL,status TEXT NOT NULL,attempt INTEGER NOT NULL DEFAULT 0,payload TEXT NOT NULL,error TEXT)',
     'CREATE TABLE IF NOT EXISTS transient_cache(key TEXT PRIMARY KEY,expires_at TEXT NOT NULL,payload TEXT NOT NULL)',
+    'CREATE INDEX IF NOT EXISTS cache_expiry ON transient_cache(expires_at)',
     "CREATE TRIGGER IF NOT EXISTS ledger_no_update BEFORE UPDATE ON ledger BEGIN SELECT RAISE(ABORT,'APPEND_ONLY_LEDGER'); END",
     "CREATE TRIGGER IF NOT EXISTS ledger_no_delete BEFORE DELETE ON ledger BEGIN SELECT RAISE(ABORT,'APPEND_ONLY_LEDGER'); END",
   ])this.run(q);}
@@ -74,8 +76,12 @@ export class Repository {
   enqueue(id:string,kind:string,payload:unknown,due=now()){
     this.run("INSERT OR IGNORE INTO jobs(id,kind,due_at,status,payload) VALUES(?,?,?,'PENDING',?)",id,kind,due,JSON.stringify(payload));
   }
+  coalescePeriodic(at=now()){
+    // Keep one due poll per category/type after an outage; archive superseded jobs.
+    this.run("UPDATE jobs SET status='SUPERSEDED',error='Replaced by a more recent poll after backlog recovery' WHERE id IN (SELECT id FROM (SELECT id,row_number() OVER(PARTITION BY kind,coalesce(json_extract(payload,'$.category'),''),CASE WHEN kind='SETTLE_FUNDS' THEN payload ELSE '' END ORDER BY due_at DESC,id DESC) n FROM jobs WHERE status='PENDING' AND due_at<=? AND kind IN ('SCAN','SETTLE','SETTLE_FUNDS','RESEARCH_DISPATCH')) WHERE n>1)",at);
+  }
   claim(at=now()):any|null{return this.atomic(()=>{
-    const job=this.one("SELECT * FROM jobs WHERE (status='PENDING' AND due_at<=?) OR (status='RUNNING' AND lease_until<?) ORDER BY CASE kind WHEN 'MEETING' THEN 0 WHEN 'SLOT' THEN 1 WHEN 'EMERGENCY' THEN 1 WHEN 'NOTIFY' THEN 2 WHEN 'SETTLE' THEN 3 ELSE 4 END,due_at LIMIT 1",at,at);
+    const job=this.one("SELECT * FROM jobs WHERE (status='PENDING' AND due_at<=?) OR (status='RUNNING' AND lease_until<?) ORDER BY CASE kind WHEN 'SETTLE' THEN 0 WHEN 'SETTLE_FUNDS' THEN 0 WHEN 'MEETING' THEN 1 WHEN 'SLOT' THEN 2 WHEN 'EMERGENCY' THEN 2 WHEN 'NOTIFY' THEN 3 ELSE 4 END,due_at LIMIT 1",at,at);
     if(!job)return null;
     const lease=new Date(Date.parse(at)+120000).toISOString();
     this.run("UPDATE jobs SET status='RUNNING',lease_until=?,attempt=attempt+1 WHERE id=?",lease,job.id);

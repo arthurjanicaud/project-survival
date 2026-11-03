@@ -53,6 +53,7 @@ export class Engine {
     const held=this.repo.rows("SELECT market_id FROM positions WHERE status='PENDING' ORDER BY created_at").map(p=>p.market_id);
     for(let offset=CONFIG.settlementBatch;offset<held.length;offset+=CONFIG.settlementBatch)this.repo.enqueue('settle-funds:'+bucket+':'+offset,'SETTLE_FUNDS',{ids:held.slice(offset,offset+CONFIG.settlementBatch)});
     if(Date.now()>=Date.parse(s.end_at!))this.repo.enqueue('finish:'+bucket,'FINISH',{});
+    this.repo.coalescePeriodic();
     this.repo.prune();
   }
   async preflight(){

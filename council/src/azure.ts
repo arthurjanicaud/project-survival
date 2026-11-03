@@ -14,7 +14,7 @@ export function boundedContext(context:any){
   if(c.market){delete c.market.books;delete c.market.history;c.market.description=String(c.market.description||'').slice(0,7000);}
   if(c.sources)c.sources=c.sources.slice(0,5).map((s:any)=>({...s,text:String(s.text).slice(0,2000)}));
   if(c.history)c.history=c.history.slice(-8).map((e:any)=>({actor:e.actor,text:e.text,kind:e.kind}));
-  if(c.memory)c.memory=c.memory.slice(-5);
+  if(c.memory)c.memory=c.memory.slice(-5).map((e:any)=>({kind:e.kind,text:String(e.text||'').slice(0,900),details:Object.fromEntries(Object.entries(e.details||{}).filter(([k])=>['category','result','brier_score','estimated_yes_probability','forecast_scores','council_brier_score','ex_ante_assessment','counterfactual_id'].includes(k)))}));
   if(c.positions){
     const exposure:Record<string,{count:number;cost:string}>={};
     for(const p of c.positions.filter((p:any)=>p.status==='PENDING')){const category=p.payload?.category||p.category||'unknown';exposure[category]??={count:0,cost:'0'};exposure[category].count++;exposure[category].cost=D(exposure[category].cost).plus(p.cost).toFixed();}
@@ -29,6 +29,15 @@ export function boundedContext(context:any){
   while(size>CONFIG.maxContextChars&&c.history?.length>3){c.history.splice(1,1);size=JSON.stringify(c).length;}
   if(size>CONFIG.maxContextChars&&c.sources){c.sources=c.sources.slice(0,3).map((s:any)=>({...s,text:s.text.slice(0,1300)}));size=JSON.stringify(c).length;}
   if(size>CONFIG.maxContextChars){if(c.positions)c.positions=c.positions.slice(0,12);if(c.memory)c.memory=c.memory.slice(0,3);if(c.history)c.history=c.history.slice(-3);if(c.previous_analysis)c.previous_analysis={reasoning:String(c.previous_analysis.reasoning||'').slice(0,600),estimated_yes_probability:c.previous_analysis.estimated_yes_probability,uncertainty:String(c.previous_analysis.uncertainty||'').slice(0,300)};if(c.market)c.market.description=c.market.description.slice(0,4000);size=JSON.stringify(c).length;}
+  if(size>CONFIG.maxContextChars){
+    // Preserve voted amounts, quotes, IDs and aggregate exposure; shorten archived prose.
+    if(c.history)c.history=c.history.map((e:any)=>({...e,text:String(e.text||'').slice(0,800)}));
+    if(c.discussion)c.discussion=c.discussion.map((d:any)=>({...d,speech:String(d.speech||'').slice(0,1000),objection:String(d.objection||'').slice(0,500)}));
+    if(c.alternatives)c.alternatives=c.alternatives.map((m:any)=>({...m,rules_excerpt:m.rules_excerpt.slice(0,300)}));
+    if(c.memory)c.memory=c.memory.map((e:any)=>({...e,text:e.text.slice(0,500)}));
+    if(c.market)c.market.description=c.market.description.slice(0,2500);
+    size=JSON.stringify(c).length;
+  }
   if(size>CONFIG.maxContextChars)throw new ProviderError('DOSSIER_TOO_LARGE');
   return c;
 }

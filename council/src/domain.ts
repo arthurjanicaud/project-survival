@@ -24,7 +24,7 @@ export const CONFIG = {
   settlementBatch:12, counterfactualBatch:10,researchRefreshMinutes:10,
   fetchTimeoutMs:15000, azureTimeoutMs:75000, azureAttempts:2, maxContextChars:26000,
   maxOutputTokens:1800, maxBookAgeSeconds:180, documentChars:9000,
-  transientCacheHours:12, quotaWarningBytes:250_000_000, version:'survival-phase3-v2.1',
+  transientCacheHours:12, quotaWarningBytes:250_000_000, version:'survival-phase3-v2.2',
 };
 export type Env = {
   COUNCIL:DurableObjectNamespace; EXPERIMENT_ID:string; TEST_EXPERIMENT_ID?:string; AZURE_DEPLOYMENT:string;
