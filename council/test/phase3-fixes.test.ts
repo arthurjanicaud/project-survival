@@ -2,7 +2,7 @@ import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {z} from 'zod';
 import {Engine} from '../src/engine';
-import {boundedContext} from '../src/azure';
+import {boundedContext,Azure} from '../src/azure';
 import {nextAlarm} from '../src/scheduling';
 import {finalResolution,ensembleSummary,sportsFacts} from '../src/markets';
 import {factualText,needsReview,sourceFreshness} from '../src/research';
@@ -127,4 +127,26 @@ test('large historical meeting prose is packed without changing the proposal or 
  history:Array.from({length:8},(_,i)=>({actor:'QUANT',kind:'SPEECH',text:'past reasoning '.repeat(250)})),
  positions:Array.from({length:25},(_,i)=>({market_id:String(i),status:'PENDING',cost:'10',quantity:'20',payload:{category:'weather',event_group:'same',question:'Named weather event '+i}}))});
  assert.ok(JSON.stringify(c).length<=26000);assert.deepEqual(c.proposal,proposal);assert.equal(c.exposure_by_category.weather.cost,'250');assert.equal(c.memory[0].details.result.YES,'1');
+});
+
+
+test('chair packet with debate, secretary documents, votes and realistic long source identifiers fits the total budget',()=>{
+ const p=proposal(),quote={observed_at:'2026-11-04T08:00:00Z',asks:[{price:'.4',size:'100'}],minimum:'5',tick:'.01',fee_rate:'.05',fee_exponent:'1'};
+ const d={market:{...market(),description:'Exact market rules '.repeat(500)},proposal:p,executable_books:{YES:quote},
+ sources:Array.from({length:5},(_,i)=>({id:String(i).repeat(64),url:'https://official.test/'+String(i).repeat(200),title:'Verified source '+i,text:'source evidence '.repeat(600)})),
+ secretary_results:Array.from({length:3},(_,i)=>({id:'secretary'+i,url:'https://archive.test/'+i,text:'archive text '.repeat(500)})),
+ memory:Array.from({length:5},()=>({kind:'LESSON',text:'past result '.repeat(100),details:{result:{YES:'1',NO:'0'},forecast_scores:Array.from({length:5},(_,i)=>({actor:String(i),probability:.5,brier_score:'.25',at:'2026-11-03T08:00:00Z'}))}})),
+ history:Array.from({length:8},()=>({kind:'SPEECH',actor:'QUANT',text:'Previous intervention '.repeat(110)})),
+ discussion:['QUANT','RISK','CONTRA'].map(actor=>({actor,value:{speech:'Contradictory discussion '.repeat(70),objection:'uncertainty '.repeat(50),amendment:{market_id:p.market_id,side:'NO',amount:'75',max_price:'.6',reason:'Amendment reason '.repeat(40)}}})),
+ alternatives:Array.from({length:4},(_,i)=>({id:String(i).repeat(64),question:'Exact alternative '+i,rules_excerpt:'rules '.repeat(150),books:{YES:quote,NO:quote}})),
+ positions:Array.from({length:40},(_,i)=>({market_id:String(i),status:'PENDING',outcome:'YES',cost:'10',quantity:'20',payload:{question:'A named exposure '+i,category:'weather',event_group:'same'}})),
+ votes:Array.from({length:5},(_,i)=>({member_id:String(i),vote:'AGAINST',proposal_id:p.id,proposal_version:p.version,speech:'Reasoned vote '.repeat(70),abstention_reason:'',reconsider_if:''}))};
+ const untouched=structuredClone(d),packed=boundedContext(d);
+ assert.ok(JSON.stringify(packed).length<=26000);assert.deepEqual(packed.proposal,p);assert.deepEqual(packed.executable_books,d.executable_books);assert.equal(packed.exposure_by_category.weather.cost,'400');assert.equal(packed.discussion.length,3);assert.equal(packed.votes.length,5);assert.equal(packed.discussion[0].amendment.amount,'75');assert.equal(packed.sources[0].id,d.sources[0].id);assert.deepEqual(d,untouched);
+});
+
+test('cached model success is restored before packing a context that subsequently grew too large',async()=>{
+ const r=repository();r.run("INSERT INTO calls(id,actor,created_at,status,result) VALUES('cached:result','CHAIR',?,'SUCCESS',?)",new Date().toISOString(),JSON.stringify({ok:true}));
+ const a=new Azure(r,env,async()=>{throw Error('No network request is allowed');});
+ assert.deepEqual(await a.ask('cached','CHAIR','test',{unshrinkable:'x'.repeat(100000)},z.object({ok:z.boolean()}).strict()),{ok:true});
 });

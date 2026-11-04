@@ -38,15 +38,45 @@ export function boundedContext(context:any){
     if(c.market)c.market.description=c.market.description.slice(0,2500);
     size=JSON.stringify(c).length;
   }
+  if(size>CONFIG.maxContextChars){
+    // Fit the COMPLETE packet, including chairman discussion, votes and secretary
+    // documents. Never shorten IDs, prices, stake, outcome, timestamps or risk totals.
+    const prose:{object:any;key:string;minimum:number}[]=[];
+    const add=(object:any,key:string,minimum:number)=>{if(object&&typeof object[key]==='string')prose.push({object,key,minimum});};
+    add(c.market,'description',900);
+    for(const source of [...(c.sources||[]),...(c.secretary_results||[])])add(source,'text',650);
+    for(const e of c.history||[])add(e,'text',250);
+    for(const e of c.memory||[]){add(e,'text',180);add(e.details,'ex_ante_assessment',180);}
+    for(const d of c.discussion||[]){add(d,'speech',450);add(d,'objection',250);add(d.amendment,'reason',250);}
+    for(const v of c.votes||[]){add(v,'speech',400);add(v,'abstention_reason',250);add(v,'reconsider_if',200);}
+    for(const m of c.alternatives||[])add(m,'rules_excerpt',160);
+    add(c.previous_analysis,'reasoning',250);add(c.previous_analysis,'uncertainty',180);
+    let shortened=0;
+    while(JSON.stringify(c).length>CONFIG.maxContextChars){
+      const largest=prose.filter(p=>p.object[p.key].length>p.minimum).sort((a,b)=>(b.object[b.key].length-b.minimum)-(a.object[a.key].length-a.minimum))[0];
+      if(!largest)break;
+      const text=largest.object[largest.key],length=Math.max(largest.minimum,Math.floor(text.length*.75));
+      largest.object[largest.key]=text.slice(0,length-1)+'…';shortened++;
+    }
+    if(shortened)c.context_note='Certains textes sont des extraits raccourcis. Les archives intégrales restent disponibles au secrétaire ; ne déduis aucun fait des passages omis.';
+    // Reserve space for the explanatory note too.
+    while(JSON.stringify(c).length>CONFIG.maxContextChars){
+      const largest=prose.filter(p=>p.object[p.key].length>p.minimum).sort((a,b)=>(b.object[b.key].length-b.minimum)-(a.object[a.key].length-a.minimum))[0];
+      if(!largest)break;largest.object[largest.key]=largest.object[largest.key].slice(0,Math.max(largest.minimum,largest.object[largest.key].length-200));
+    }
+    size=JSON.stringify(c).length;
+  }
   if(size>CONFIG.maxContextChars)throw new ProviderError('DOSSIER_TOO_LARGE');
   return c;
 }
 export class Azure {
   constructor(private repo:Repository,private env:Env,private transport:typeof fetch=(...args)=>fetch(...args)){}
   async ask<T>(id:string,actor:MemberId,phase:string,context:any,schema:z.ZodType<T>,meeting:string|null=null):Promise<T>{
-    const packed=boundedContext(context),identity=member(actor);
     const cached=this.repo.one('SELECT status,result FROM calls WHERE id=? AND status=? ORDER BY created_at DESC LIMIT 1',id+':result','SUCCESS');
     if(cached?.result)return schema.parse(JSON.parse(cached.result));
+    const packed=boundedContext(context),identity=member(actor);
+    const packing={at:now(),actor,phase,meeting_id:meeting,original_chars:JSON.stringify(context).length,packed_chars:JSON.stringify(packed).length,limit_chars:CONFIG.maxContextChars};
+    this.repo.set('context_pack_last',packing);this.repo.set('context_pack:'+actor+':'+phase,packing);
     const circuit=this.repo.get<any>('azure_circuit');
     if(circuit?.open_until&&Date.parse(circuit.open_until)>Date.now())throw new ProviderError('AZURE_CIRCUIT_OPEN');
     if(!this.env.AZURE_ENDPOINT||!this.env.AZURE_KEY)throw new ProviderError('AZURE_NOT_CONFIGURED');
