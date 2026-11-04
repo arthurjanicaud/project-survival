@@ -29,7 +29,7 @@ def deploy():
     remember('COUNCIL_NTFY_TOPIC', topic)
     env = dict(os.environ, CLOUDFLARE_API_TOKEN=c['CLOUDFLARE_API_TOKEN'], CLOUDFLARE_ACCOUNT_ID=c['CLOUDFLARE_ACCOUNT_ID'], WRANGLER_SEND_METRICS='false')
     exe = ROOT / 'council/node_modules/.bin/wrangler.cmd'
-    subprocess.run([str(exe), 'deploy'], cwd=ROOT/'council', env=env, check=True)
+    subprocess.run([str(exe), 'deploy', '--durable-objects-code-update-mode', 'immediate'], cwd=ROOT/'council', env=env, check=True)
     payload = {'AZURE_ENDPOINT': c['AZURE_OPENAI_ENDPOINT'], 'AZURE_KEY': c['AZURE_OPENAI_API_KEY'], 'ADMIN_TOKEN': token, 'NTFY_TOPIC': topic}
     if c.get('COUNCIL_GITHUB_NOTIFIER_TOKEN'):
         payload['GITHUB_NOTIFIER_TOKEN']=c['COUNCIL_GITHUB_NOTIFIER_TOKEN']

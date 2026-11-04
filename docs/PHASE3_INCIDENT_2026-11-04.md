@@ -21,3 +21,9 @@ Le journal technique conserve les tailles originales et compactées par rôle et
 - Vérification TypeScript réussie.
 
 La phase officielle conserve sa date de départ, son historique et ses comptes. Les réunions déjà annulées ne sont pas réécrites rétroactivement. La prochaine réunion traite les données et propositions encore valides.
+
+## Adoption effective du code
+
+Un contrôle supplémentaire a trouvé la version v2.2 encore active après l’acceptation du déploiement v2.3. Cloudflare a changé son comportement par défaut le 30 octobre : un objet actif peut différer l’adoption de la nouvelle version (voir [le changelog officiel](https://developers.cloudflare.com/changelog/post/2026-10-30-durable-objects-deferred-code-updates/)).
+
+La version du 4 novembre a été activée avec `--durable-objects-code-update-mode immediate`, puis la lecture du moteur officiel a confirmé v2.3. Les commandes de déploiement du projet incluent désormais ce paramètre. Les tâches interrompues restent protégées par leurs baux persistants et leurs clés d’idempotence ; elles peuvent attendre l’expiration du bail avant de reprendre. Une commande de publication réussie ne remplace plus le contrôle de version active.
