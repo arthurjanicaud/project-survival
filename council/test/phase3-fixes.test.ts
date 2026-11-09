@@ -150,3 +150,10 @@ test('cached model success is restored before packing a context that subsequentl
  const a=new Azure(r,env,async()=>{throw Error('No network request is allowed');});
  assert.deepEqual(await a.ask('cached','CHAIR','test',{unshrinkable:'x'.repeat(100000)},z.object({ok:z.boolean()}).strict()),{ok:true});
 });
+
+
+test('paginated audit export preserves rows without duplicates and rejects arbitrary tables',()=>{
+ const r=repository();for(let i=0;i<205;i++)r.set('audit'+i,{i});const all:any[]=[];let after=0;
+ for(;;){const p=r.exportPage('meta',after,50);all.push(...p.rows);after=p.next;if(p.done)break;}
+ assert.equal(all.length,205);assert.equal(new Set(all.map(x=>x.key)).size,205);assert.throws(()=>r.exportPage('meta; DROP TABLE ledger'),/INVALID_EXPORT_TABLE/);assert.equal(r.exportPage('meta',0,100000).rows.length,100);
+});

@@ -133,5 +133,11 @@ export class Repository {
   cache<T=any>(key:string):T|null{const r=this.one('SELECT payload FROM transient_cache WHERE key=? AND expires_at>?',key,now());return r?JSON.parse(r.payload):null;}
   putCache(key:string,payload:any,seconds=3600){this.run('INSERT INTO transient_cache VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET expires_at=excluded.expires_at,payload=excluded.payload',key,new Date(Date.now()+seconds*1000).toISOString(),JSON.stringify(payload));}
   prune(){this.run('DELETE FROM transient_cache WHERE expires_at<?',now());/* Financial, document and meeting evidence is never pruned. */}
+  exportPage(table:string,after=0,limit=100){
+    const allowed=['meta','documents','markets','dossiers','meetings','proposals','votes','events','ledger','positions','fills','counterfactuals','jobs','calls','notifications'];
+    if(!allowed.includes(table))throw Error('INVALID_EXPORT_TABLE');
+    const rows=this.rows(`SELECT rowid AS export_cursor,* FROM ${table} WHERE rowid>? ORDER BY rowid LIMIT ?`,Math.max(0,Math.floor(after)),Math.min(100,Math.max(1,Math.floor(limit))));
+    return {schema_version:3,exported_at:now(),table,rows,next:rows.length?rows[rows.length-1].export_cursor:after,done:rows.length<Math.min(100,Math.max(1,Math.floor(limit)))};
+  }
   export(){const result:Record<string,any>={schema_version:3,exported_at:now()};for(const t of ['meta','documents','markets','dossiers','meetings','proposals','votes','events','ledger','positions','fills','counterfactuals','jobs','calls','notifications'])result[t]=this.rows(`SELECT * FROM ${t}`);return result;}
 }

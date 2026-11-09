@@ -62,6 +62,7 @@ export class Council extends DurableObject<Env>{
         this.repo.event('analysis-recovery:'+at,'RECOVERY',`${failed.length} analyses techniques seront reprises avec des carnets actualisés. Les incidents précédents restent dans le journal.`);
         await this.arm();return json({queued:failed.length});
       }
+      if(path==='/admin/export-page')return json(this.repo.exportPage(u.searchParams.get('table')||'',Number(u.searchParams.get('after'))||0,Number(u.searchParams.get('limit'))||100));
       if(path==='/admin/export')return json(this.repo.export());
       if(path==='/admin/resolution-check'){
         const id=u.searchParams.get('market_id')||'';if(!/^\d+$/.test(id))throw Error('VALID_MARKET_ID_REQUIRED');
