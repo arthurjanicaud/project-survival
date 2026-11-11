@@ -1,5 +1,7 @@
 # Nouveau protocole après la phase 3
 
+**Mise à jour : le protocole courant est maintenant la [semaine active](PHASE4_ACTIVE.md), compte `survival-004-active`, avec évaluation en parallèle. Les étapes observation/pilote décrites ci-dessous sont historiques. Les procédures de données, sauvegarde, restauration et tests restent applicables.**
+
 ## Principe
 
 Les spécialistes donnent une probabilité et un intervalle avant de voir les prix et les autres avis. Le conseil révèle ensuite les prévisions, débat et vote sur une proposition précisément versionnée. Une méthode subjective reste appelée `judgement`, sans se prétendre calibrée. Les résultats officiels permettent de mesurer précision, calibration et comparaison aux prix sur les mêmes événements. Le score de Brier est la moyenne des erreurs au carré : plus bas est meilleur.

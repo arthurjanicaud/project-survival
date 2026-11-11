@@ -37,3 +37,9 @@ def test_watchdog_does_not_report_planned_final_settlement_margin_as_a_research_
     at=datetime(2026,11,11,12,tzinfo=timezone.utc)
     health={'run':{'status':'RUNNING','last_scan':'2026-11-11T06:00:00Z'},'state':{'betting_deadline':'2026-11-11T07:00:00Z','last_cycle':'2026-11-11T11:59:00Z'}}
     assert inspect(health,at) is None
+
+
+def test_watchdog_allows_initial_scan_warmup_but_detects_a_launch_that_never_progresses():
+    at=datetime(2026,11,11,12,tzinfo=timezone.utc)
+    assert inspect({'run':{'status':'RUNNING','started_at':'2026-11-11T11:59:00Z'}},at) is None
+    assert inspect({'run':{'status':'RUNNING','started_at':'2026-11-11T11:30:00Z'}},at)

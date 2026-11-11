@@ -1,5 +1,7 @@
 # Suivi des correctifs après la phase 3
 
+**Évolution autorisée par le propriétaire : le fonds courant utilise une [semaine active](PHASE4_ACTIVE.md) avec 1 000 € fictifs dès le départ. Les seuils de qualification des points 40–45 restent des outils d'évaluation, sans être des conditions préalables obligatoires pour ce fonds. Les protections d'exécution, de données et d'exposition restent actives.**
+
 Les lignes suivantes détaillent les changements par thème. « Implémenté » désigne une capacité logicielle, pas une efficacité prédictive prouvée. Les limites et mesures futures restent explicites. Le code est sous `council/src/reform/`, les tests principaux sous `council/test/reform.test.ts`.
 
 | N° | Correctif | Réalisation ou limite explicite |

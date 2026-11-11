@@ -100,7 +100,7 @@ export class Repository {
     if(!quantity.eq(e.quantity)||!spent.eq(e.spent)||D(e.spent).gt(p.amount))throw Error('INCONSISTENT_EXECUTION');
     this.run('INSERT INTO ledger VALUES(?,?,?,?,?)',id+':buy',now(),'BUY',D(e.spent).neg().toFixed(),id);
     const proof=this.proof(m.books[p.side]);
-    const probability=this.dossier(m.id)?.payload?.analysis?.estimated_yes_probability??null;
+    const probability=p.initial_estimated_yes_probability??this.dossier(m.id)?.payload?.analysis?.estimated_yes_probability??null;
     const position={proposal:p,question:m.question,url:m.url,category:m.category,end_at:m.event_end_at,estimated_yes_probability:probability,expected_edge_per_share:probability===null?null:D(p.side==='YES'?probability:D(1).minus(probability)).minus(D(e.spent).div(e.quantity)).toFixed(),reason,fees:e.fees,market_version:m.version,event_group:m.group,initial_estimated_yes_probability:probability,council_estimated_yes_probability:p.estimated_yes_probability??null,book_proof:proof,outcome_label:m.outcome_labels?.[p.side]||p.side};
     this.run("INSERT INTO positions VALUES(?,?,?,'PENDING',?,?,?,?)",id,m.id,p.side,e.spent,e.quantity,now(),JSON.stringify(position));
     e.fills.forEach((f,i)=>this.run('INSERT INTO fills VALUES(?,?,?,?,?,?,?)',`${id}:${i}`,id,m.assets[p.side],m.books[p.side].evidence,f.price,f.quantity,f.fee));

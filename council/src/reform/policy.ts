@@ -1,6 +1,8 @@
 import {z} from 'zod';
 export const PolicySchema=z.object({
-  version:z.literal('survival-reform-1'),durationHours:z.number().int().min(24).max(720),
+  version:z.enum(['survival-reform-1','survival-active-1']),durationHours:z.number().int().min(24).max(720),
+  maximumSlippageTicks:z.number().int().min(0).max(5).default(2),
+  requireQualification:z.boolean().default(true),unvalidatedBetFraction:z.number().positive().max(.05).default(.025),minimumEstimatedEdge:z.number().min(0).max(.2).default(.02),
   shadowMinimumHours:z.number().min(24),pilotCapitalEur:z.string().regex(/^\d+(\.\d+)?$/),fullCapitalEur:z.string().regex(/^\d+(\.\d+)?$/),
   minimumResolvedEvents:z.number().int().min(20),minimumMethodEvents:z.number().int().min(10),
   reserveFraction:z.number().min(0).max(.9),betFraction:z.number().positive().max(.25),clusterFraction:z.number().positive().max(.5),
@@ -22,3 +24,6 @@ export const POLICY=PolicySchema.parse({version:'survival-reform-1',durationHour
   staleScanMinutes:20,sourceFamiliesRequired:1,settlementMarginHours:6,archiveDays:14,
   freeRowsReadDaily:5_000_000,freeRowsWrittenDaily:100_000,freeRequestsDaily:100_000});
 export type Policy=z.infer<typeof PolicySchema>;
+
+export const ACTIVE_POLICY=PolicySchema.parse({...POLICY,version:'survival-active-1',requireQualification:false,initialReleaseFraction:1,unvalidatedBetFraction:.025});
+export function policyFor(stage:string,active:boolean){return stage==='FULL'&&active?ACTIVE_POLICY:POLICY;}

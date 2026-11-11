@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {repository,env,market,book} from './helpers';
 import {ReformRepository} from '../src/reform/store';
 import {ReformEngine} from '../src/reform/engine';
-import {POLICY,PolicySchema} from '../src/reform/policy';
+import {POLICY,ACTIVE_POLICY,PolicySchema} from '../src/reform/policy';
 import {ForecastSchema,validateForecast,score,chronologicalSplit,calibrate,benchmark,type ScoredForecast} from '../src/reform/forecast';
 import {weatherRules,observations,quality,family,anomaly,routineTemperature} from '../src/reform/evidence';
 import {allowance} from '../src/reform/allocation';
@@ -178,4 +178,48 @@ test('a full synthetic week exposes missing hours instead of reporting only succ
 test('new routine weather reports do not rebill reasoning for unchanged extremes within the same observation window',async()=>{
  const s=harness(),sources=[{id:'one',url:'https://aviationweather.gov/api/data/metar',title:'Routine',provider:'NOAA AWC',status:'VERIFIED' as const,fetched_at:'2026-11-11T13:00:00Z',text:'raw report 1'}],metar={rules:{station:'NZWN'},extreme:20,yes_impossible:false,latest:'2026-11-11T13:00:00Z'};
  const first=await s.e.factSignature(sources,metar);assert.equal(await s.e.factSignature([{...sources[0],id:'two',text:'raw report 2',fetched_at:'2026-11-11T13:30:00Z'}],{...metar,latest:'2026-11-11T13:30:00Z'}),first);assert.notEqual(await s.e.factSignature(sources,{...metar,extreme:21}),first);assert.notEqual(await s.e.factSignature(sources,{...metar,latest:'2026-11-11T15:00:00Z'}),first);
+});
+
+
+test('active week starts with 1000 euros and can vote and buy without prior qualification',async()=>{
+ const s=harness();s.e.env={...env,REFORM_ACTIVE_MODE:'true'};await s.e.prepare('survival-active-test','FULL');assert.equal(s.e.run().policy.requireQualification,false);assert.equal(s.e.qualification().eligible,false);await s.e.start('survival-active-test');assert.equal(s.r.cash(),'1100');assert.ok(s.r.one("SELECT id FROM jobs WHERE json_extract(payload,'$.kickoff')=1"));
+ await s.e.preparePacket(s.m.id,'football');const packet=s.r.one('SELECT id FROM r4_packets');await s.e.forecast(packet.id,'FOOTBALL');assert.equal(s.r.packet(packet.id).status,'CANDIDATE');assert.equal(s.e.budget(s.r.packet(packet.id),'YES').maximum,'27.5');
+ await s.e.slot(new Date().toISOString(),false,true);const id=s.r.one('SELECT id FROM r4_agendas').id;for(let i=0;i<8&&s.e.meetingRow(id).status==='RUNNING';i++)await s.e.meeting(id);
+ assert.equal(s.e.meetingRow(id).status,'COMPLETED');assert.equal(s.r.rows('SELECT * FROM positions').length,1);assert.equal(s.r.cash(),'1072.5');assert.equal(s.e.summary().positions[0].cost_eur,'25');assert.equal(s.e.summary().positions[0].payload.initial_estimated_yes_probability,.7);assert.equal(s.e.summary().meeting_metrics.completed,0,'kickoff is separate from scheduled ordinary meetings');
+ const p=s.r.one('SELECT * FROM positions');s.r.settle(p,{...s.m,resolved:true,payouts:{YES:'1',NO:'0'}});assert.equal(s.r.cash(),'1127.5');
+});
+
+test('active allocation uses a fixed bounded stake instead of Kelly on an uncalibrated interval',()=>{
+ const input={initial:'1000',cash:'1000',spent:'0',clusterCost:'0',elapsedFraction:0,probability:.7,lower:.1,price:'.5',feePerShare:'0',methodQualified:false};
+ assert.equal(allowance(input,ACTIVE_POLICY).maximum,'25');assert.equal(allowance({...input,cash:'200'},ACTIVE_POLICY).maximum,'0');assert.equal(allowance({...input,clusterCost:'200'},ACTIVE_POLICY).maximum,'0');assert.equal(allowance({...input,probability:.501},ACTIVE_POLICY).maximum,'0');assert.equal(allowance(input,POLICY).maximum,'0');
+});
+
+test('active week does not create a bet or meeting candidate when the estimates offer no executable edge',async()=>{
+ const s=harness(),original=s.e.azure.ask.bind(s.e.azure);s.e.env={...env,REFORM_ACTIVE_MODE:'true'};s.e.azure.ask=(async(...args:any[])=>args[2]==='independent_forecast'?{...f,probability:.5,lower:.4,upper:.6}:(original as any)(...args)) as any;
+ await s.e.prepare('survival-active-no-edge','FULL');await s.e.start('survival-active-no-edge');await s.e.preparePacket(s.m.id,'football');const packet=s.r.one('SELECT id FROM r4_packets');await s.e.forecast(packet.id,'FOOTBALL');assert.equal(s.r.packet(packet.id).status,'OBSERVING');await s.e.slot(new Date().toISOString());assert.equal(s.r.one('SELECT status FROM r4_agendas').status,'NO_AGENDA');assert.equal(s.r.cash(),'1100');assert.equal(s.r.rows('SELECT * FROM positions').length,0);
+});
+
+test('archiving observation retains history and prevents further reasoning jobs without touching the funded run',async()=>{
+ const shadow=harness();await shadow.e.prepare('survival-shadow-archive','SHADOW');await shadow.e.start('survival-shadow-archive');await shadow.e.preparePacket(shadow.m.id,'football');const p=shadow.r.one('SELECT id FROM r4_packets');await shadow.e.forecast(p.id,'FOOTBALL');const before=shadow.r.rows('SELECT * FROM r4_forecasts');
+ assert.throws(()=>shadow.e.archiveObservation('wrong'),/EXPLICIT/);assert.equal(shadow.e.archiveObservation('survival-shadow-archive').archived,true);shadow.e.tick();assert.equal(shadow.e.run().status,'FINISHED');assert.ok(shadow.e.run().stopped_at);assert.deepEqual(shadow.r.rows('SELECT * FROM r4_forecasts'),before);assert.equal(shadow.r.cash(),'0');assert.equal(shadow.r.rows("SELECT * FROM jobs WHERE status='PENDING' AND kind!='NOTIFY'").length,0);assert.equal(shadow.e.archiveObservation('survival-shadow-archive').duplicate,true);
+ const active=harness();active.e.env={...env,REFORM_ACTIVE_MODE:'true'};await active.e.prepare('survival-active-archive-check','FULL');await active.e.start('survival-active-archive-check');assert.throws(()=>active.e.archiveObservation('survival-active-archive-check'),/EXPLICIT/);assert.equal(active.r.cash(),'1100');
+});
+
+
+test('active council can approve the opposite outcome despite specialist opposition after revising its probability',async()=>{
+ const s=harness(),original=s.e.azure.ask.bind(s.e.azure);s.e.env={...env,REFORM_ACTIVE_MODE:'true'};
+ s.e.azure.ask=(async(...args:any[])=>{const [id,actor,phase,c]=args;
+   if(phase==='chair_resolution')return {speech:'Le débat justifie de réviser la probabilité et de soumettre le résultat opposé au vote.',estimated_yes_probability:.3,question:'',question_to:null,amendment:{market_id:c.proposal.market_id,side:'NO',amount:c.proposal.amount,max_price:'.5',reason:'Révision explicite après les objections contradictoires.'},document_requests:[]};
+   const v=await (original as any)(...args);return phase==='independent_vote'&&actor==='FOOTBALL'?{...v,vote:'AGAINST'}:v;
+ }) as any;
+ await s.e.prepare('survival-active-revision','FULL');await s.e.start('survival-active-revision');await s.e.preparePacket(s.m.id,'football');const p=s.r.one('SELECT id FROM r4_packets');await s.e.forecast(p.id,'FOOTBALL');await s.e.slot(new Date().toISOString());const id=s.r.one('SELECT id FROM r4_agendas').id;
+ for(let i=0;i<9&&s.e.meetingRow(id).status==='RUNNING';i++)await s.e.meeting(id);
+ assert.equal(s.r.rows('SELECT * FROM positions').length,1);assert.equal(s.r.one('SELECT outcome FROM positions').outcome,'NO');assert.equal(s.r.one('SELECT status FROM proposals ORDER BY version DESC LIMIT 1').status,'APPROVED');assert.equal(s.e.summary().positions[0].payload.council_estimated_yes_probability,.3);
+});
+
+
+test('active voted limit tolerates a small real book move but still spends only observed liquidity',async()=>{
+ const s=harness();s.e.env={...env,REFORM_ACTIVE_MODE:'true'};await s.e.prepare('survival-active-price-move','FULL');await s.e.start('survival-active-price-move');await s.e.preparePacket(s.m.id,'football');const p=s.r.one('SELECT id FROM r4_packets');await s.e.forecast(p.id,'FOOTBALL');await s.e.slot(new Date().toISOString());const id=s.r.one('SELECT id FROM r4_agendas').id;
+ for(let i=0;i<8&&s.e.meetingRow(id).payload.stage!=='EXECUTE';i++)await s.e.meeting(id);assert.equal(s.e.meetingRow(id).payload.proposal.max_price,'0.52');s.m.books.YES!.asks=[{price:'.51',size:'1000'}];await s.e.meeting(id);
+ assert.equal(s.r.rows('SELECT * FROM positions').length,1);assert.equal(s.r.one('SELECT price FROM fills').price,'0.51');assert.ok(Number(s.r.one('SELECT cost FROM positions').cost)<=27.5);assert.ok(Number(s.r.cash())>=0);
 });

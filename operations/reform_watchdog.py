@@ -11,6 +11,7 @@ def inspect(health,at):
     deadline=state.get('betting_deadline')
     research_closed=deadline and at>=datetime.fromisoformat(deadline.replace('Z','+00:00'))
     last=state.get('last_cycle') if run.get('status')=='CLOSING' or research_closed else run.get('last_scan')
+    last=last or run.get('started_at')
     if not last:return 'Aucune progression enregistrée depuis le lancement'
     age=(at-datetime.fromisoformat(last.replace('Z','+00:00'))).total_seconds()/60
     return f'Progression interrompue depuis plus de 20 minutes' if age>20 else None
