@@ -28,14 +28,14 @@ export const CONFIG = {
 };
 export type Env = {
  CF_VERSION_METADATA?: {id:string;tag?:string;timestamp?:string};
-  COUNCIL:DurableObjectNamespace; REFORM?:DurableObjectNamespace; REFORM_SHADOW_ID?:string; REFORM_PILOT_ID?:string; REFORM_FULL_ID?:string; EXPERIMENT_ID:string; TEST_EXPERIMENT_ID?:string; AZURE_DEPLOYMENT:string;
+  COUNCIL:DurableObjectNamespace; REFORM?:DurableObjectNamespace; REFORM_SHADOW_ID?:string; REFORM_PILOT_ID?:string; REFORM_FULL_ID?:string; REFORM_ACTIVE_MODE?:string; EXPERIMENT_ID:string; TEST_EXPERIMENT_ID?:string; AZURE_DEPLOYMENT:string;
   AZURE_ENDPOINT?:string; AZURE_KEY?:string; ADMIN_TOKEN?:string;
   PUBLIC_ORIGIN:string; ALLOW_FIXTURES?:string; NTFY_TOPIC?:string; NTFY_TOKEN?:string; NTFY_DELIVERY?:string; GITHUB_NOTIFIER_TOKEN?:string;
 };
 export type Book = {asset_id:string; observed_at:string;exchange_at?:string; bids:{price:string;size:string}[]; asks:{price:string;size:string}[]; minimum:string;tick:string;fee_rate:string;fee_exponent:string;evidence:string};
 export type Source = {id:string;url:string;title:string;text:string;fetched_at:string;status:'VERIFIED'|'UNAVAILABLE';provider:string};
 export type Market = {id:string;question:string;event_title?:string;fixture_context?:string;description:string;rules_complete?:boolean;category:Category;url:string;group:string;version:'v1'|'v2';condition_id:string|null;question_id:string|null;assets:{YES:string;NO:string};outcome_labels?:{YES:string;NO:string};start_at:string|null;end_at:string;event_end_at:string;resolution_source:string;active:boolean;resolved:boolean;payouts:{YES:string;NO:string}|null;resolution_evidence:Record<string,unknown>|null;liquidity:string;volume:string;books:Partial<Record<'YES'|'NO',Book>>;delay_seconds:number;observed_at:string;tags:string[]};
-export type Proposal = {id:string;meeting_id:string;market_id:string;version:number;side:'YES'|'NO';amount:string;max_price:string;status:string;reason:string;created_at:string;estimated_yes_probability?:number|null};
+export type Proposal = {id:string;meeting_id:string;market_id:string;version:number;side:'YES'|'NO';amount:string;max_price:string;status:string;reason:string;created_at:string;estimated_yes_probability?:number|null;initial_estimated_yes_probability?:number|null};
 export type State = {id:string;mode:'live'|'demo'|'validation'|'test';duration_hours?:number;status:'READY'|'RUNNING'|'CLOSING'|'FINISHED';started_at:string|null;end_at:string|null;betting_deadline:string|null;fx:{usd_per_eur:string;reference_date:string;source:string;method:string}|null;initial_eur:string;created_at:string;updated_at:string;last_scan:string|null;last_cycle:string|null;emergency_day:string;emergency_count:number;last_emergency:string|null;last_error:string|null};
 export const decimalString=z.string().regex(/^\d+(?:\.\d+)?$/).max(28);
 const nullableDecimal=decimalString.nullable();

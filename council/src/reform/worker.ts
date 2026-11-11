@@ -46,15 +46,16 @@ export class ReformCouncil extends DurableObject<Env>{
       if(path==='/api/meeting'){const id=u.searchParams.get('id')||'';return json({meeting:this.engine.meetingRow(id),events:this.repo.events(0,id,300)});}
       if(path==='/api/document'){const row=this.repo.one('SELECT payload FROM r4_evidence WHERE id=?',u.searchParams.get('id')||'');return row?json(JSON.parse(row.payload)):json({error:'NOT_FOUND'},404);}
       if(path==='/admin/seed-history'&&r.method==='POST'){
-        if(this.engine.run().status!=='READY'||this.engine.run().stage!=='SHADOW')throw Error('HISTORY_SEED_ONLY_BEFORE_SHADOW');
+        if(this.engine.run().status!=='READY'||(this.engine.run().stage!=='SHADOW'&&this.engine.run().policy.requireQualification))throw Error('HISTORY_SEED_ONLY_BEFORE_LAUNCH');
         const body:any=await r.json();if(body.origin_experiment!=='survival-003'||typeof body.source_sha256!=='string'||!/^[a-f0-9]{64}$/.test(body.source_sha256)||JSON.stringify(body).length>20000||!Array.isArray(body.lessons)||body.lessons.length>10)throw Error('INVALID_LEGACY_HISTORY');
         if(this.repo.get('r4:legacy_lessons'))throw Error('HISTORY_ALREADY_SEEDED');this.repo.set('r4:legacy_lessons',body);return json({stored:true,validation_samples_added:0});
       }
       if(path==='/admin/probe-azure'&&r.method==='POST')return json({azure:await this.engine.azure.ask('r4:probe:'+now(),'CHAIR','connectivity_probe',{protocol:'reform-v4',instruction:'Test technique, réponds ok true. Aucun investissement.'},z.object({ok:z.boolean()}).strict()),experiment_started:this.engine.run().started_at!==null});
       if(path==='/admin/qualification')return json(this.engine.qualification());
+      if(path==='/admin/archive-observation'&&r.method==='POST'){const body:any=await r.json();const result=this.engine.archiveObservation(body.confirm);await this.arm();return json(result);}
       if(path==='/admin/start'&&r.method==='POST'){
         const body:any=await r.json();let qualification=null;
-        if(target.stage!=='SHADOW'){
+        if(this.engine.run().policy.requireQualification&&target.stage!=='SHADOW'){
           const peer=this.env.REFORM!.get(this.env.REFORM!.idFromName(this.env.REFORM_SHADOW_ID!));
           const response=await peer.fetch(new Request('https://internal/admin/qualification',{headers:{'x-reform-stage':'shadow'}}));if(!response.ok)throw Error('SHADOW_QUALIFICATION_UNAVAILABLE');qualification=await response.json();
           if(target.stage==='FULL'){
@@ -73,7 +74,7 @@ export class ReformCouncil extends DurableObject<Env>{
         if(url.hostname==='site.api.espn.com'&&!/^\/apis\/site\/v2\/sports\/(basketball|soccer|tennis)\/[a-z0-9.]+\/scoreboard$/.test(url.pathname))throw Error('INVALID_RESEARCH_PATH');
         if(url.hostname==='api.opendota.com'&&!/^\/api\/teams(?:\/\d+\/matches)?$/.test(url.pathname))throw Error('INVALID_RESEARCH_PATH');
         this.repo.putCache('research:'+url.href,{fetched_at:b.fetched_at,data:b.data},Math.max(1,Math.floor((3600000-age)/1000)));
-        this.repo.run('DELETE FROM meta WHERE key=?','source_demand:'+url.href);this.repo.set('research_collector',{at:now(),last_fetched_at:b.fetched_at});return json({stored:true});
+        this.repo.run('DELETE FROM meta WHERE key=?','source_demand:'+url.href);const previous=this.repo.get<any>('research_collector')||{};this.repo.set('research_collector',{...previous,at:now(),last_fetched_at:b.fetched_at,...(b.batch_kind==='full'?{full_at:now()}:{}),...(url.hostname==='api.opendota.com'?{opendota_at:now()}: {})});return json({stored:true});
       }
       if(path==='/admin/notification-outbox')return json({topic:this.env.NTFY_TOPIC,notifications:this.repo.rows("SELECT * FROM notifications WHERE status='PENDING' ORDER BY created_at LIMIT 10").map(n=>({...JSON.parse(n.payload),id:n.id,phase:4,stage:target.stage.toLowerCase()}))});
       if(path==='/admin/notification-ack'&&r.method==='POST'){const b:any=await r.json();const row=this.repo.one('SELECT payload FROM notifications WHERE id=?',b.id);if(row)this.repo.run("UPDATE notifications SET status='SENT',payload=? WHERE id=?",JSON.stringify({...JSON.parse(row.payload),sent_at:now()}),b.id);return json({ok:true});}

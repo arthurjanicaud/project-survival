@@ -1,6 +1,6 @@
 # PROJECT SURVIVAL
 
-**Réforme après la phase 3 : prévisions indépendantes et qualification avant les mises.** Le guide courant est [PHASE4_GUIDE.md](docs/PHASE4_GUIDE.md) et le suivi détaillé est [PHASE4_CORRECTIFS.md](docs/PHASE4_CORRECTIFS.md). Les trois étapes ont leurs propres comptes : observation sans mises, pilote fictif de 100 €, fonds fictif de 1 000 €. Aucune étape ne démarre au déploiement. Les anciennes phases restent archivées ; les commandes START ci-dessous sont historiques.
+**Phase 4 : une semaine active, 1 000 € fictifs dès le départ.** Le guide courant est [PHASE4_ACTIVE.md](docs/PHASE4_ACTIVE.md). Les prévisions sont évaluées en parallèle des mises : aucun pilote ni seuil de qualification préalable ne bloque le fonds actif. L'observation précédente reste archivée. Le suivi technique figure dans [PHASE4_CORRECTIFS.md](docs/PHASE4_CORRECTIFS.md), les procédures de sauvegarde dans [PHASE4_GUIDE.md](docs/PHASE4_GUIDE.md). Aucun déploiement ne lance START ; les commandes des anciennes phases ci-dessous sont historiques.
 
 ## Phase 2 — paris sur événements
 

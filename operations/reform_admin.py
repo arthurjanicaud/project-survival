@@ -8,8 +8,8 @@ from dotenv import dotenv_values
 ROOT=Path(__file__).resolve().parents[1]
 TABLES=['meta','documents','markets','ledger','positions','fills','proposals','votes','calls','events','notifications','jobs','r4_packets','r4_evidence','r4_forecasts','r4_outcomes','r4_cycles','r4_assessments','r4_agendas','r4_models','r4_usage']
 def configuration():return {**dotenv_values(ROOT/'.env'),**os.environ}
-def request(command,stage='shadow',data=None):
-    cfg=configuration();paths={'state':'/api/state','health':'/api/health','start':'/admin/start','preflight':'/admin/preflight','tick':'/admin/tick','qualification':'/admin/qualification','seed-history':'/admin/seed-history','probe-azure':'/admin/probe-azure'}
+def request(command,stage='full',data=None):
+    cfg=configuration();paths={'state':'/api/state','health':'/api/health','start':'/admin/start','archive-observation':'/admin/archive-observation','preflight':'/admin/preflight','tick':'/admin/tick','qualification':'/admin/qualification','seed-history':'/admin/seed-history','probe-azure':'/admin/probe-azure'}
     method='GET' if command in ['state','health','qualification'] else 'POST'
     r=httpx.request(method,cfg['COUNCIL_API_URL']+paths[command],params={'phase':'4','stage':stage},headers={'Authorization':'Bearer '+cfg['COUNCIL_ADMIN_TOKEN']},json=data if method=='POST' else None,timeout=120)
     r.raise_for_status();return r.json()
@@ -72,8 +72,8 @@ def restore(path,instance,confirm):
         return post('/admin/restore-finish',{})
 
 def main():
-    p=argparse.ArgumentParser();p.add_argument('command',choices=['state','health','start','preflight','tick','qualification','export','seed-history','probe-azure','restore']);p.add_argument('--stage',choices=['shadow','pilot','full'],default='shadow');p.add_argument('--confirm');p.add_argument('--output');p.add_argument('--input');p.add_argument('--instance');a=p.parse_args()
-    if a.command=='start' and not a.confirm:raise RuntimeError('Explicit --confirm experiment-id is required')
+    p=argparse.ArgumentParser();p.add_argument('command',choices=['state','health','start','preflight','tick','qualification','export','seed-history','probe-azure','restore','archive-observation']);p.add_argument('--stage',choices=['shadow','pilot','full'],default='full');p.add_argument('--confirm');p.add_argument('--output');p.add_argument('--input');p.add_argument('--instance');a=p.parse_args()
+    if a.command in ['start','archive-observation'] and not a.confirm:raise RuntimeError('Explicit --confirm experiment-id is required')
     if a.command=='restore':
         if not a.input or not a.confirm:raise RuntimeError('--input backup directory and --confirm original ID are required')
         result=restore(a.input,a.instance,a.confirm)
@@ -82,7 +82,7 @@ def main():
         result=export(a.stage,a.output)
     else:
         if a.command=='seed-history' and not a.input:raise RuntimeError('--input official phase3 export required')
-        result=request(a.command,a.stage,legacy_lessons(a.input) if a.command=='seed-history' else {'confirm':a.confirm} if a.command=='start' else {})
+        result=request(a.command,a.stage,legacy_lessons(a.input) if a.command=='seed-history' else {'confirm':a.confirm} if a.command in ['start','archive-observation'] else {})
         if a.output:Path(a.output).parent.mkdir(parents=True,exist_ok=True);Path(a.output).write_text(json.dumps(result,ensure_ascii=False,indent=2),encoding='utf-8');result={'saved':a.output}
     print(json.dumps(result,ensure_ascii=True,indent=2))
 if __name__=='__main__':main()
