@@ -83,7 +83,7 @@ test('blind forecasts, council votes, shadow execution and outcome scores are co
   await s.e.settle();assert.equal(s.e.scored().length,1);assert.equal(s.e.summary().score.n,1);assert.equal(s.r.cash(),'0');
 });
 test('paper pilot cannot start because a short or unqualified shadow merely produced activity',async()=>{
-  const s=harness();await s.e.prepare('survival-test-pilot','PILOT');await assert.rejects(s.e.start('survival-test-pilot',{eligible:false}),/QUALIFIED/);assert.equal(s.r.cash(),'0');assert.equal(s.e.run().status,'READY');
+  const s=harness();await s.e.prepare('survival-test-pilot','PILOT');await assert.rejects(s.e.start('survival-test-pilot',{eligible:false}),/QUALIFIED/);await assert.rejects(s.e.start('survival-test-pilot',{eligible:true,policy_hash:s.e.run().policy_hash,code_version:'old-unvalidated-code'}),/QUALIFIED/);assert.equal(s.r.cash(),'0');assert.equal(s.e.run().status,'READY');
 });
 
 
@@ -100,7 +100,7 @@ import {fitResiduals,residualProbability} from '../src/reform/models';
 import {reformTarget} from '../src/reform/routing';
 
 test('qualified pilot buys and settles once after reconstruction, including exact euro P&L',async()=>{
- const s=harness();await s.e.prepare('survival-test-pilot','PILOT');const q={eligible:true,policy_hash:s.e.run().policy_hash,methods:[{category:'football',method:'judgement',eligible:true}]};await s.e.start('survival-test-pilot',q);
+ const s=harness();await s.e.prepare('survival-test-pilot','PILOT');const q={eligible:true,policy_hash:s.e.run().policy_hash,code_version:s.e.activeCode(),methods:[{category:'football',method:'judgement',eligible:true}]};await s.e.start('survival-test-pilot',q);
  await s.e.preparePacket(s.m.id,'football');const p=s.r.one('SELECT id FROM r4_packets');await s.e.forecast(p.id,'FOOTBALL');await s.e.slot(new Date().toISOString());const id=s.r.one('SELECT id FROM r4_agendas').id;
  for(let i=0;i<8&&s.e.meetingRow(id).status==='RUNNING';i++)await s.e.meeting(id);
  assert.equal(s.r.rows('SELECT * FROM positions').length,1);const cash=s.r.cash();assert.equal(cash,'104.5');assert.equal(s.r.rows("SELECT * FROM ledger WHERE kind='BUY'").length,1);

@@ -59,7 +59,7 @@ export class ReformCouncil extends DurableObject<Env>{
           const response=await peer.fetch(new Request('https://internal/admin/qualification',{headers:{'x-reform-stage':'shadow'}}));if(!response.ok)throw Error('SHADOW_QUALIFICATION_UNAVAILABLE');qualification=await response.json();
           if(target.stage==='FULL'){
             const pilot=this.env.REFORM!.get(this.env.REFORM!.idFromName(this.env.REFORM_PILOT_ID!));const response=await pilot.fetch(new Request('https://internal/api/state',{headers:{'x-reform-stage':'pilot'}}));const data:any=await response.json();
-            if(data.run?.status!=='FINISHED'||data.positions?.some((p:any)=>p.status!=='SETTLED')||Number(data.profit_eur)<0)throw Error('COMPLETED_NONNEGATIVE_PILOT_REQUIRED');
+            if(data.run?.status!=='FINISHED'||data.run?.code_version!==this.engine.activeCode()||data.run?.policy_hash!==this.engine.run().policy_hash||!data.positions?.length||data.positions?.some((p:any)=>p.status!=='SETTLED')||Number(data.profit_eur)<0)throw Error('COMPLETED_NONNEGATIVE_PILOT_REQUIRED');
           }
         }
         const result=await this.engine.start(body.confirm,qualification);await this.arm();return json(result);

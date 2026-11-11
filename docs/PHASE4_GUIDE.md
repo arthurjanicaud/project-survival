@@ -10,7 +10,7 @@ Le fonds de la phase 3 n'est ni remis à zéro ni recyclé.
 |---|---|---:|---|
 | Observation | survival-004-shadow | 0 € | START explicite |
 | Pilote | survival-004-pilot | 100 € | Observation qualifiée + START |
-| Fonds complet | survival-004-full | 1 000 € | Observation qualifiée, pilote terminé non négatif + START |
+| Fonds complet | survival-004-full | 1 000 € | Observation qualifiée, pilote avec mises terminé non négatif + START |
 
 Chaque étape dure 168 heures après son propre START. L'ensemble peut donc dépasser une semaine. L'observation ne constitue pas la compétition du fonds complet. Comptabilité en unités de cotation, référence EUR/USD horodatée et figée au départ.
 
@@ -62,7 +62,7 @@ Une fin prévue six heures avant la clôture ne garantit pas un paiement à temp
 
 Le moteur utilise Cloudflare Durable Objects SQLite ; le nouveau protocole n'écrit pas dans Supabase. Les journaux financiers et prévisions initiales sont immuables. Réveils, baux et transactions protègent des doubles exécutions. Les scans dépassés sont remplacés ; votes et mouvements sont conservés.
 
-La politique et le code actif Cloudflare sont affichés. Un changement de code pendant un run suspend les nouvelles décisions, tandis que les règlements restent suivis. Ne pas redéployer une semaine en cours comme un changement neutre de méthode.
+La politique et le code actif Cloudflare sont affichés. Un changement de code pendant un run suspend les nouvelles décisions, tandis que les règlements restent suivis. La qualification et les étapes suivantes exigent la même version de code et de politique ; un pilote sans aucune mise ne valide pas le fonds complet. Ne pas redéployer une semaine en cours comme un changement neutre de méthode.
 
 Un watchdog GitHub externe contrôle la progression, tente un réveil et alerte via ntfy. Il ne lance pas START. GitHub et ntfy restent des dépendances ; leur disponibilité absolue n'est pas garantie. Le relais et le collecteur fonctionnent environ toutes les cinq minutes ; GitHub peut retarder les horaires.
 

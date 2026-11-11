@@ -27,7 +27,7 @@ export class ReformEngine {
   }
   async start(confirm:string,qualification:any=null){
     const run=this.run();if(confirm!==run.id)throw Error('EXPLICIT_EXPERIMENT_ID_REQUIRED');if(run.status!=='READY')throw Error('START_IS_NEVER_A_RESET');
-    if(run.stage!=='SHADOW'&&(!qualification?.eligible||qualification.policy_hash!==run.policy_hash))throw Error('QUALIFIED_OUT_OF_SAMPLE_SHADOW_REQUIRED');
+    if(run.stage!=='SHADOW'&&(!qualification?.eligible||qualification.policy_hash!==run.policy_hash||qualification.code_version!==this.activeCode()))throw Error('QUALIFIED_OUT_OF_SAMPLE_SHADOW_REQUIRED');
     run.code_version=this.env.CF_VERSION_METADATA?.id||'local-test';
     const fx=await this.markets.fx();
     this.repo.atomic(()=>{run.status='RUNNING';run.started_at=now();run.end_at=new Date(Date.now()+run.policy.durationHours*3600000).toISOString();run.evaluation_cutoff=new Date(Date.now()+24*3600000).toISOString();run.qualification=qualification;
@@ -139,13 +139,13 @@ export class ReformEngine {
     }
   }
   scored(actor?:string,phase='BEFORE'):ScoredForecast[]{
-    return this.repo.rows("SELECT p.id packet_id,p.market_id,p.event_id,p.category,f.actor,f.at,f.payload forecast,json_extract(p.payload,'$.baseline.probability') baseline,o.payload outcome,o.observed_at FROM r4_forecasts f JOIN r4_packets p ON p.id=f.packet_id JOIN r4_outcomes o ON o.market_id=p.market_id WHERE f.phase=?"+(actor?' AND f.actor=?':' AND f.actor=upper(p.category)'),...(actor?[phase,actor]:[phase])).flatMap(r=>{const f=JSON.parse(r.forecast),o=JSON.parse(r.outcome);if(f.probability===null||!['0','1'].includes(o.payouts.YES)||r.baseline===null||r.at>=o.resolved_at)return [];return [{packet:r.packet_id,event:r.event_id,market:r.market_id,category:r.category,method:f.method_id,at:r.at,resolved_at:r.observed_at,probability:f.probability,baseline:r.baseline,outcome:Number(o.payouts.YES) as 0|1}];});
+    return this.repo.rows("SELECT p.id packet_id,p.market_id,p.event_id,p.category,f.actor,f.at,f.payload forecast,json_extract(p.payload,'$.baseline.probability') baseline,o.payload outcome,o.observed_at FROM r4_forecasts f JOIN r4_packets p ON p.id=f.packet_id JOIN r4_outcomes o ON o.market_id=p.market_id WHERE f.phase=?"+(actor?' AND f.actor=?':' AND f.actor=upper(p.category)')+' ORDER BY f.at,f.packet_id',...(actor?[phase,actor]:[phase])).flatMap(r=>{const f=JSON.parse(r.forecast),o=JSON.parse(r.outcome);if(f.probability===null||!['0','1'].includes(o.payouts.YES)||r.baseline===null||r.at>=o.resolved_at)return [];return [{packet:r.packet_id,event:r.event_id,market:r.market_id,category:r.category,method:f.method_id,at:r.at,resolved_at:r.observed_at,probability:f.probability,baseline:r.baseline,outcome:Number(o.payouts.YES) as 0|1}];});
   }
   qualification(){
     const run=this.run(),rows=this.scored(),test=evaluationWindows(rows,run.evaluation_cutoff||now()).test,cov=this.coverage();
     const methods=[...new Set(test.map(r=>r.category+':'+r.method))].map(key=>{const [category,method]=key.split(':'),rows=test.filter(r=>r.category===category&&r.method===method),result=score(rows);return {category,method,score:result,eligible:result.events>=run.policy.minimumMethodEvents&&result.improvement?.lower95!==null&&result.improvement?.lower95!==undefined&&result.improvement.lower95>0&&result.calibration_error!==null&&result.calibration_error<=run.policy.maximumCalibrationError};});
     const global=readiness(test,run.started_at,cov.fraction,run.policy);
-    return {...global,eligible:global.eligible&&methods.some(m=>m.eligible),methods,policy_hash:run.policy_hash,train_cutoff:run.evaluation_cutoff,scope:'Resolved, prospectively timestamped forecasts; held-out events only'};
+    return {...global,eligible:global.eligible&&methods.some(m=>m.eligible)&&this.protocolCurrent(),reasons:[...global.reasons,...(!this.protocolCurrent()?['Code changé depuis les prévisions : nouvelle observation requise']:[])],methods,code_version:run.code_version,policy_hash:run.policy_hash,train_cutoff:run.evaluation_cutoff,scope:'Resolved, prospectively timestamped forecasts; held-out events only'};
   }
   coverage(){const run=this.run(),until=new Date(Math.min(Date.now(),Date.parse(this.repo.state()?.betting_deadline||run.end_at||now()))).toISOString();return {...coverage(run.started_at,until,this.repo.rows('SELECT bucket,category,status FROM r4_cycles'),CATEGORIES,run.policy.scanMinutes),research_until:until,note:'Coverage measured during the scheduled research window, excluding the planned final settlement margin.'};}
   watch(){
