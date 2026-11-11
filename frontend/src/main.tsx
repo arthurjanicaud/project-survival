@@ -42,6 +42,7 @@ import type { Agent, State, Snapshot } from "./types";
 import "./style.css";
 import { PhaseTwo } from "./phase2";
 import { PhaseThree } from "./phase3";
+import { PhaseFour } from "./phase4";
 import { DashboardBoundary } from "./dashboard-boundary";
 
 const colors = [
@@ -1457,6 +1458,6 @@ function App() {
 }
 createRoot(document.getElementById("root")!).render(
   <React.StrictMode><DashboardBoundary>
-    {new URLSearchParams(location.search).get("phase") === "1" ? <App /> : new URLSearchParams(location.search).get("phase") === "2" ? <PhaseTwo /> : <PhaseThree />}
+    {new URLSearchParams(location.search).get("phase") === "1" ? <App /> : new URLSearchParams(location.search).get("phase") === "2" ? <PhaseTwo /> : new URLSearchParams(location.search).get("phase") === "3" || new URLSearchParams(location.search).get("mode") === "demo" ? <PhaseThree /> : <PhaseFour />}
   </DashboardBoundary></React.StrictMode>,
 );

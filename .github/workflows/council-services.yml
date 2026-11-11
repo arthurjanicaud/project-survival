@@ -15,12 +15,20 @@ jobs:
     env:
       COUNCIL_API_URL: ${{ vars.COUNCIL_API_URL }}
       COUNCIL_ADMIN_TOKEN: ${{ secrets.COUNCIL_ADMIN_TOKEN }}
+      COUNCIL_NTFY_TOPIC: ${{ secrets.COUNCIL_NTFY_TOPIC }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
       - run: pip install httpx python-dotenv
+      - uses: actions/cache@v4
+        with:
+          path: data/reform-watchdog.json
+          key: reform-watchdog-${{ github.run_id }}
+          restore-keys: reform-watchdog-
+      - name: Check independent progress
+        run: python operations/reform_watchdog.py
       - name: Relay phone notifications
         run: python operations/council_collect.py notifications
       - name: Collect shared public research

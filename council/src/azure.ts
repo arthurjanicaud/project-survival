@@ -2,6 +2,8 @@ import {z} from 'zod';
 import {CONFIG,member,now,type Env,type MemberId} from './domain';
 import {Repository} from './repository';
 import {D} from './finance';
+import {REFORM_SYSTEM} from './reform/prompts';
+import {reformContext} from './reform/context';
 
 export class ProviderError extends Error{constructor(public code:string,message=code){super(message);}}
 export function usageCost(u:any){
@@ -74,14 +76,14 @@ export class Azure {
   async ask<T>(id:string,actor:MemberId,phase:string,context:any,schema:z.ZodType<T>,meeting:string|null=null):Promise<T>{
     const cached=this.repo.one('SELECT status,result FROM calls WHERE id=? AND status=? ORDER BY created_at DESC LIMIT 1',id+':result','SUCCESS');
     if(cached?.result)return schema.parse(JSON.parse(cached.result));
-    const packed=boundedContext(context),identity=member(actor);
+    const packed=context.protocol==='reform-v4'?reformContext(context):boundedContext(context),identity=member(actor);
     const packing={at:now(),actor,phase,meeting_id:meeting,original_chars:JSON.stringify(context).length,packed_chars:JSON.stringify(packed).length,limit_chars:CONFIG.maxContextChars};
     this.repo.set('context_pack_last',packing);this.repo.set('context_pack:'+actor+':'+phase,packing);
     const circuit=this.repo.get<any>('azure_circuit');
     if(circuit?.open_until&&Date.parse(circuit.open_until)>Date.now())throw new ProviderError('AZURE_CIRCUIT_OPEN');
     if(!this.env.AZURE_ENDPOINT||!this.env.AZURE_KEY)throw new ProviderError('AZURE_NOT_CONFIGURED');
     const jsonSchema:any=z.toJSONSchema(schema);delete jsonSchema.$schema;
-    const system=`Tu es ${identity.name}, ${identity.role}, membre d'un conseil autonome de paris fictifs. ${identity.personality}
+    const system=context.protocol==='reform-v4'?REFORM_SYSTEM+`\nTu es ${identity.name}, ${identity.role}. Phase : ${phase}.`: `Tu es ${identity.name}, ${identity.role}, membre d'un conseil autonome de paris fictifs. ${identity.personality}
 Tu écris en français naturel, clair, professionnel, sans JSON dans ton intervention speech. Tes propos sont réellement publiés sous ton nom : ne fais parler aucun autre membre.
 Le fonds commun commence à 1000 EUR. Cherche activement des opportunités argumentées et accepte l'incertitude ; n'exige pas la certitude. Aucun pari forcé, aucune mise symbolique par défaut, aucune limite de prudence arbitraire. Une objection doit si possible proposer une solution concrète (autre côté, montant ou information).
 Tu peux estimer une probabilité par jugement explicite à partir de données vérifiées incomplètes. L'absence d'un modèle statistique calibré, de cotes externes ou de toutes les compositions n'est pas, à elle seule, une raison d'attendre. Explique ton estimation et ses limites. Distingue une information essentielle susceptible d'inverser la décision d'une information simplement souhaitable. N'invente jamais la donnée manquante.
