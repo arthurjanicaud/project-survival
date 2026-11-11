@@ -42,6 +42,27 @@ def deploy():
     remember('COUNCIL_API_URL', url)
     print(json.dumps({'api_url':url, 'experiment_started':False}))
 
+def paginated_export(c,params,path):
+    from datetime import datetime,timezone
+    tables=['meta','documents','markets','dossiers','meetings','proposals','votes','events','ledger','positions','fills','counterfactuals','jobs','calls','notifications']
+    target=Path(path);target.parent.mkdir(parents=True,exist_ok=True)
+    with httpx.Client(timeout=90,headers={'Authorization':'Bearer '+c['COUNCIL_ADMIN_TOKEN']}) as client,target.open('w',encoding='utf-8') as out:
+        out.write('{"schema_version":3,"exported_at":'+json.dumps(datetime.now(timezone.utc).isoformat()))
+        for table in tables:
+            out.write(','+json.dumps(table)+':[');after=0;first=True
+            while True:
+                r=client.get(c['COUNCIL_API_URL']+'/admin/export-page',params={**params,'table':table,'after':after,'limit':50});r.raise_for_status();page=r.json()
+                for row in page['rows']:
+                    row.pop('export_cursor',None)
+                    if not first:out.write(',')
+                    out.write(json.dumps(row,ensure_ascii=False));first=False
+                after=page['next']
+                if page['done']:break
+            out.write(']')
+        out.write('}')
+    print('Saved paginated export: '+str(target))
+
+
 def main():
     p = argparse.ArgumentParser()
     p.add_argument('command', choices=['deploy','health','state','preflight','notify-test','export','start','tick','reconcile','rehearse','restore'])
@@ -73,6 +94,8 @@ def main():
     if a.command=='start' and not a.confirm:
         raise RuntimeError('Explicit --confirm experiment-id is required')
     params={'experiment':'test'} if a.test else {'instance':a.instance} if a.instance else {}
+    if a.command=='export' and a.output:
+        paginated_export(c,params,a.output);return
     r = httpx.request(method, c['COUNCIL_API_URL']+path, headers={'Authorization':'Bearer '+c['COUNCIL_ADMIN_TOKEN']}, params=params, json=data if method=='POST' else None, timeout=180)
     r.raise_for_status()
     if a.output:

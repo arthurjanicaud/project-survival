@@ -81,7 +81,7 @@ export class Repository {
     this.run("UPDATE jobs SET status='SUPERSEDED',error='Replaced by a more recent poll after backlog recovery' WHERE id IN (SELECT id FROM (SELECT id,row_number() OVER(PARTITION BY kind,coalesce(json_extract(payload,'$.category'),''),CASE WHEN kind='SETTLE_FUNDS' THEN payload ELSE '' END ORDER BY due_at DESC,id DESC) n FROM jobs WHERE status='PENDING' AND due_at<=? AND kind IN ('SCAN','SETTLE','SETTLE_FUNDS','RESEARCH_DISPATCH')) WHERE n>1)",at);
   }
   claim(at=now()):any|null{return this.atomic(()=>{
-    const job=this.one("SELECT * FROM jobs WHERE (status='PENDING' AND due_at<=?) OR (status='RUNNING' AND lease_until<?) ORDER BY CASE kind WHEN 'SETTLE' THEN 0 WHEN 'SETTLE_FUNDS' THEN 0 WHEN 'MEETING' THEN 1 WHEN 'SLOT' THEN 2 WHEN 'EMERGENCY' THEN 2 WHEN 'NOTIFY' THEN 3 ELSE 4 END,due_at LIMIT 1",at,at);
+    const job=this.one("SELECT * FROM jobs WHERE (status='PENDING' AND due_at<=?) OR (status='RUNNING' AND lease_until<?) ORDER BY CASE kind WHEN 'R4_SETTLE' THEN 0 WHEN 'R4_MEETING' THEN 1 WHEN 'R4_SLOT' THEN 2 WHEN 'R4_WATCH' THEN 3 WHEN 'R4_SCAN' THEN 4 WHEN 'R4_PREPARE' THEN 5 WHEN 'R4_FORECAST' THEN 5 WHEN 'R4_SEARCH' THEN 6 WHEN 'SETTLE' THEN 0 WHEN 'SETTLE_FUNDS' THEN 0 WHEN 'MEETING' THEN 1 WHEN 'SLOT' THEN 2 WHEN 'EMERGENCY' THEN 2 WHEN 'NOTIFY' THEN 3 ELSE 4 END,due_at LIMIT 1",at,at);
     if(!job)return null;
     const lease=new Date(Date.parse(at)+120000).toISOString();
     this.run("UPDATE jobs SET status='RUNNING',lease_until=?,attempt=attempt+1 WHERE id=?",lease,job.id);

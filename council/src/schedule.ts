@@ -3,11 +3,11 @@ const formatter=new Intl.DateTimeFormat('en-CA',{timeZone:'Europe/Paris',year:'n
 export function parisParts(date:Date){
   return Object.fromEntries(formatter.formatToParts(date).map(p=>[p.type,p.value]));
 }
-export function nextSlots(after:string,end?:string|null,count=8):string[]{
+export function nextSlots(after:string,end?:string|null,count=8,hours:number[]=CONFIG.meetingHours):string[]{
   const slots:string[]=[];let t=Math.ceil((Date.parse(after)+1)/3600000)*3600000;
   for(let i=0;i<24*10&&slots.length<count;i++,t+=3600000){
     if(end&&t>Date.parse(end))break;
-    const p=parisParts(new Date(t));if(p.minute==='00'&&CONFIG.meetingHours.includes(Number(p.hour)))slots.push(new Date(t).toISOString());
+    const p=parisParts(new Date(t));if(p.minute==='00'&&hours.includes(Number(p.hour)))slots.push(new Date(t).toISOString());
   }
   return slots;
 }

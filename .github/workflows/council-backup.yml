@@ -8,7 +8,7 @@ permissions:
 jobs:
   backup:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 15
     env:
       COUNCIL_API_URL: ${{ vars.COUNCIL_API_URL }}
       COUNCIL_ADMIN_TOKEN: ${{ secrets.COUNCIL_ADMIN_TOKEN }}
@@ -26,4 +26,28 @@ jobs:
         with:
           name: council-backup-${{ github.run_id }}
           path: exports/phase3/*.json.gz
-          retention-days: 7
+          retention-days: 2
+
+  reform:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      COUNCIL_API_URL: ${{ vars.COUNCIL_API_URL }}
+      COUNCIL_ADMIN_TOKEN: ${{ secrets.COUNCIL_ADMIN_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install httpx python-dotenv
+      - name: Export independently restorable protocol snapshots
+        shell: bash
+        run: |
+          for stage in shadow pilot full; do
+            python operations/reform_admin.py export --stage "$stage" --output "exports/reform/$stage"
+          done
+      - uses: actions/upload-artifact@v4
+        with:
+          name: reform-backup-${{ github.run_id }}
+          path: exports/reform/
+          retention-days: 2

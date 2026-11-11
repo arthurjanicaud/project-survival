@@ -5,6 +5,9 @@ workers_dev = true
 
 [vars]
 EXPERIMENT_ID = "survival-003"
+REFORM_SHADOW_ID = "survival-004-shadow"
+REFORM_PILOT_ID = "survival-004-pilot"
+REFORM_FULL_ID = "survival-004-full"
 TEST_EXPERIMENT_ID = "test-20261031-24h"
 AZURE_DEPLOYMENT = "gpt-6.1-sol-3"
 PUBLIC_ORIGIN = "https://project-survival.pages.dev"
@@ -25,3 +28,14 @@ new_sqlite_classes = ["Council"]
 [observability]
 enabled = true
 head_sampling_rate = 0.1
+
+[[durable_objects.bindings]]
+name = "REFORM"
+class_name = "ReformCouncil"
+
+[[migrations]]
+tag = "v4-research-protocol"
+new_sqlite_classes = ["ReformCouncil"]
+
+[version_metadata]
+binding = "CF_VERSION_METADATA"

@@ -3,7 +3,7 @@ import {Repository} from './repository';
 import {D} from './finance';
 
 const GAMMA='https://gamma-api.polymarket.com',CLOB='https://clob.polymarket.com',DATA='https://data-api.polymarket.com';
-const allowed=new Set(['gamma-api.polymarket.com','clob.polymarket.com','data-api.polymarket.com','api.frankfurter.dev','api.weather.gov','api.open-meteo.com','ensemble-api.open-meteo.com','site.api.espn.com','api.opendota.com']);
+const allowed=new Set(['gamma-api.polymarket.com','clob.polymarket.com','data-api.polymarket.com','api.frankfurter.dev','api.weather.gov','api.open-meteo.com','ensemble-api.open-meteo.com','site.api.espn.com','api.opendota.com','aviationweather.gov']);
 const arr=(x:any):any[]=>Array.isArray(x)?x:typeof x==='string'?JSON.parse(x):[];
 const numeric=(v:any)=>v===undefined||v===null?null:D(String(v)).toFixed();
 const nameKey=(v:any)=>String(v||'').normalize('NFKD').replace(/\p{M}/gu,'').toLowerCase().replace(/[^\p{L}\p{N}]+/gu,' ').trim();
@@ -16,7 +16,7 @@ export function nameMatches(name:any,text:string){
 export async function hash(value:unknown){return [...new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(JSON.stringify(value))))].map(v=>v.toString(16).padStart(2,'0')).join('');}
 export function coveragePreference(m:Market){
   const s=m.url+' '+m.resolution_source;
-  return (m.category==='basketball'&&/\/nba-|nba\.com/.test(s)?20:0)+(m.category==='football'&&/\/(epl|lal|bund|bun|lig1|ita|mls|ucl|bra)-/.test(s)?20:0)+(m.category==='football'&&/\bvs\.?\s/i.test(m.question)?4:0)+(m.category==='esport'&&/dota/i.test(m.question)?15:0)+(m.category==='tennis'&&/itftennis|challenger|sioux.falls/i.test(s+' '+m.question)?-15:0)+(/player-props|handicap|first-set|game[1-9]|1h-|2h-/.test(s)?-8:0)+Math.log10(Math.max(1,Number(m.liquidity)));
+  return (m.category==='basketball'&&/\/nba-|nba\.com/.test(s)?20:0)+(m.category==='football'&&/\/(epl|lal|bund|bun|lig1|ita|mls|ucl|uwcl|bra|bra2)-/.test(s)?20:0)+(m.category==='football'&&/\bvs\.?\s/i.test(m.question)?4:0)+(m.category==='esport'&&/dota/i.test(m.question)?15:0)+(m.category==='tennis'&&/itftennis|challenger|sioux.falls/i.test(s+' '+m.question)?-15:0)+(/player-props|handicap|first-set|game[1-9]|1h-|2h-/.test(s)?-8:0)+Math.log10(Math.max(1,Number(m.liquidity)));
 }
 export function classify(raw:any):Category|null{
   const s=[raw.question,raw.category,raw.sportsMarketType,...(raw.tags||[]).map((t:any)=>t.slug||t.label),...(raw.events||[]).flatMap((e:any)=>[e.title,e.slug,...(e.tags||[]).map((t:any)=>t.slug||t.label)])].join(' ').toLowerCase();
@@ -27,7 +27,7 @@ export function classify(raw:any):Category|null{
   if(/soccer|premier.league|champions.league|bundesliga|ligue.1|la.liga|serie.a|\bmls\b|\bfifa\b/.test(s))return 'football';
   return null;
 }
-const cities=[
+export const cities=[
   // Airport coordinates checked against NOAA Aviation Weather stationinfo.
   {names:/beijing/i,lat:40.082,lon:116.603,tz:'Asia/Shanghai',station:'ZBAA'},
   {names:/shanghai/i,lat:31.146,lon:121.8,tz:'Asia/Shanghai',station:'ZSPD'},
@@ -101,7 +101,7 @@ export function normalize(raw:any,category:Category,at=now()):Market{
   if(raw.version&&!['v1','v2'].includes(raw.version))throw Error('UNKNOWN_PROTOCOL');
   const t=timing(raw,category);
   const slug=String(raw.events?.[0]?.slug||raw.slug||raw.id),fixture=category==='weather'?null:slug.match(/^(.*?20\d\d-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01]))(?:-|$)/)?.[1];
-  return {id:String(raw.id),question:raw.question,event_title:String(raw.events?.[0]?.title||raw.question),description:String(raw.description||'').slice(0,14000),category,url:`https://polymarket.com/event/${slug}`,group:category==='weather'?'weather:'+(cities.find(c=>new RegExp('\\b'+c.station+'\\b','i').test(String(raw.description||'')+' '+String(raw.resolutionSource||'')))||cities.find(c=>c.names.test(raw.question)))!.station+':'+t.start+':'+(/lowest/i.test(raw.question)?'min':/rain|precipitation/i.test(raw.question)?'rain':'max'):fixture||String(raw.events?.[0]?.id||raw.id),version:raw.version||'v1',
+  return {id:String(raw.id),question:raw.question,event_title:String(raw.events?.[0]?.title||raw.question),description:String(raw.description||'').slice(0,14000),rules_complete:String(raw.description||'').length<=14000,category,url:`https://polymarket.com/event/${slug}`,group:category==='weather'?'weather:'+(cities.find(c=>new RegExp('\\b'+c.station+'\\b','i').test(String(raw.description||'')+' '+String(raw.resolutionSource||'')))||cities.find(c=>c.names.test(raw.question)))!.station+':'+t.start+':'+(/lowest/i.test(raw.question)?'min':/rain|precipitation/i.test(raw.question)?'rain':'max'):fixture||String(raw.events?.[0]?.id||raw.id),version:raw.version||'v1',
     condition_id:raw.conditionId||raw.condition_id||null,question_id:raw.questionID||raw.questionId||raw.question_id||null,assets:{YES:String(assets[0]),NO:String(assets[1])},outcome_labels:{YES:String(outcomes[0]),NO:String(outcomes[1])},start_at:t.start,end_at:raw.endDate,event_end_at:t.end,
     resolution_source:String(raw.resolutionSource||raw.events?.[0]?.resolutionSource||String(raw.description||'').match(/https:\/\/[^\s)]+/)?.[0]||''),active:!!(raw.active&&!raw.closed&&raw.acceptingOrders),resolved:false,payouts:null,resolution_evidence:null,
     liquidity:String(raw.liquidityNum||raw.liquidity||'0'),volume:String(raw.volume24hr||'0'),books:{},delay_seconds:Number(raw.secondsDelay||0),observed_at:at,
@@ -237,7 +237,7 @@ export class Markets {
     }else{
       const date=Date.parse(m.start_at||m.event_end_at);
       const days=[0,-1,1].map(offset=>new Date(date+offset*86400000).toISOString().slice(0,10).replace(/-/g,''));
-      const prefix=m.url.split('/event/')[1]?.split('-')[0],mapping:Record<string,string>={bra:'soccer/bra.1',epl:'soccer/eng.1',lal:'soccer/esp.1',bund:'soccer/ger.1',bun:'soccer/ger.1',lig1:'soccer/fra.1',ita:'soccer/ita.1',mls:'soccer/usa.1',ucl:'soccer/uefa.champions',nba:'basketball/nba',wnba:'basketball/wnba',atp:'tennis/atp',wta:'tennis/wta'};
+      const prefix=m.url.split('/event/')[1]?.split('-')[0],mapping:Record<string,string>={uwcl:'soccer/uefa.wchampions',bra2:'soccer/bra.2',bra:'soccer/bra.1',epl:'soccer/eng.1',lal:'soccer/esp.1',bund:'soccer/ger.1',bun:'soccer/ger.1',lig1:'soccer/fra.1',ita:'soccer/ita.1',mls:'soccer/usa.1',ucl:'soccer/uefa.champions',nba:'basketball/nba',wnba:'basketball/wnba',atp:'tennis/atp',wta:'tennis/wta'};
       const hint=mapping[prefix],leagues=hint?[hint]:m.category==='football'?['soccer/eng.1','soccer/esp.1','soccer/ger.1','soccer/fra.1','soccer/ita.1','soccer/bra.1','soccer/usa.1','soccer/uefa.champions']:m.category==='basketball'?['basketball/nba','basketball/wnba']:['tennis/atp','tennis/wta'];
       for(const league of leagues)for(const day of days){
         const s=await this.source(`https://site.api.espn.com/apis/site/v2/sports/${league}/scoreboard?dates=${day}`,`Rencontres et informations publiques ${league}`,'ESPN',d=>(d.events||[]).filter((e:any)=>{const text=m.question+' '+(m.event_title||'')+' '+(m.fixture_context||'')+' '+m.description.slice(0,1500)+(hint?' '+m.url:''),competitors=e.competitions?.flatMap((c:any)=>c.competitors||[])||[];return competitors.filter((t:any)=>[t.team?.displayName,t.team?.shortDisplayName,hint?t.team?.abbreviation:null,t.athlete?.displayName,t.athlete?.fullName].some(n=>nameMatches(n,text))).length>=2&&Math.abs(Date.parse(e.date)-date)<18*3600000;}).map((e:any)=>sportsFacts(e)).slice(0,6));

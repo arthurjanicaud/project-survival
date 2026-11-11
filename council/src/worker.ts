@@ -5,6 +5,8 @@ import {CONFIG,now,type Env} from './domain';
 import {D} from './finance';
 import {boardTarget} from './routing';
 import {Markets} from './markets';
+import {reformTarget} from './reform/routing';
+export {ReformCouncil} from './reform/worker';
 import {nextAlarm} from './scheduling';
 
 const json=(v:unknown,status=200)=>Response.json(v,{status,headers:{'Cache-Control':'no-store'}});
@@ -176,8 +178,16 @@ export default {
     if(r.method==='OPTIONS')return new Response(null,{headers:cors(r,env)});
     if(admin&&!await authorized(r,env))return json({error:'UNAUTHORIZED'},401);
     if(!admin&&!u.pathname.startsWith('/api/'))return json({error:'NOT_FOUND'},404);
+    if(u.searchParams.get('phase')==='4'){
+      if(!env.REFORM)return json({error:'REFORM_NOT_DEPLOYED'},503);
+      try{const target=reformTarget(u.searchParams.get('stage'),env),headers=new Headers(r.headers);headers.set('x-reform-stage',target.stage.toLowerCase());
+        const recovery=admin?u.searchParams.get('instance'):null;if(recovery&&!/^recovery-r4-[a-zA-Z0-9-]{1,50}$/.test(recovery))throw Error('INVALID_RECOVERY_ID');headers.delete('x-reform-recovery');if(recovery)headers.set('x-reform-recovery',recovery);
+        const result=await env.REFORM.get(env.REFORM.idFromName(recovery||target.id)).fetch(new Request(r,{headers})),out=new Response(result.body,result);for(const [k,v]of Object.entries(cors(r,env)))out.headers.set(k,v);return out;
+      }catch(e){return json({error:(e as Error).message},400);}
+    }
     let target;try{target=boardTarget(u,admin,env);}catch(e){return json({error:(e as Error).message},400);}
     const headers=new Headers(r.headers);headers.set('x-board-id',target.id);headers.set('x-board-mode',target.mode);
+    const reformFeed=env.REFORM&&admin&&u.pathname==='/admin/research'?r.clone():null;
     const mirror=admin&&u.pathname==='/admin/research'&&target.id===env.EXPERIMENT_ID&&env.TEST_EXPERIMENT_ID?r.clone():null;
     const stub=env.COUNCIL.get(env.COUNCIL.idFromName(target.id));let response=await stub.fetch(new Request(r,{headers}));
     if(response.status===101)return response;
@@ -188,6 +198,7 @@ export default {
       const shared=await env.COUNCIL.get(env.COUNCIL.idFromName(env.TEST_EXPERIMENT_ID!)).fetch(new Request(mirror,{headers:h}));
       if(!shared.ok)return json({error:'TEST_RESEARCH_DELIVERY_FAILED'},502);await shared.body?.cancel();
     }
+    if(response.ok&&reformFeed&&env.REFORM){for(const stage of ['shadow','pilot','full']){const target=reformTarget(stage,env),h=new Headers(headers);h.set('x-reform-stage',stage);const extra=await env.REFORM.get(env.REFORM.idFromName(target.id)).fetch(new Request(reformFeed.clone(),{headers:h}));await extra.body?.cancel();}}
     if(response.ok&&admin&&u.pathname==='/admin/research-demands'&&target.id===env.EXPERIMENT_ID&&env.TEST_EXPERIMENT_ID){
       const body:any=await response.json(),h=new Headers(headers);h.set('x-board-id',env.TEST_EXPERIMENT_ID);h.set('x-board-mode','test');
       const extra=await env.COUNCIL.get(env.COUNCIL.idFromName(env.TEST_EXPERIMENT_ID)).fetch(new Request(r.url,{headers:h}));
@@ -200,9 +211,14 @@ export default {
       if(extra.ok){const b:any=await extra.json();body.notifications.push(...b.notifications.map((n:any)=>({...n,instance:env.TEST_EXPERIMENT_ID})));}
       response=json(body);
     }
+    if(response.ok&&admin&&env.REFORM&&['/admin/research-demands','/admin/notification-outbox'].includes(u.pathname)&&target.id===env.EXPERIMENT_ID){
+      const body:any=await response.json();for(const stage of ['shadow','pilot','full']){const target=reformTarget(stage,env),h=new Headers(headers);h.set('x-reform-stage',stage);const extra=await env.REFORM.get(env.REFORM.idFromName(target.id)).fetch(new Request(r.url,{headers:h}));if(extra.ok){const value:any=await extra.json();if(u.pathname==='/admin/research-demands')body.requests=[...new Map([...body.requests,...value.requests].map((x:any)=>[x.url,x])).values()];else body.notifications.push(...value.notifications);}}
+      response=json(body);
+    }
     const out=new Response(response.body,response);for(const [k,v]of Object.entries(cors(r,env)))out.headers.set(k,v);return out;
   },
   async scheduled(_c:ScheduledController,env:Env,ctx:ExecutionContext){
+    if(env.REFORM)for(const stage of ['shadow','pilot','full']){const target=reformTarget(stage,env);ctx.waitUntil(env.REFORM.get(env.REFORM.idFromName(target.id)).fetch(new Request('https://internal/tick',{headers:{'x-reform-stage':stage}})));}
     for(const id of [env.EXPERIMENT_ID,env.TEST_EXPERIMENT_ID].filter(Boolean) as string[])ctx.waitUntil(env.COUNCIL.get(env.COUNCIL.idFromName(id)).fetch(new Request('https://internal/tick',{headers:{'x-board-id':id,'x-board-mode':id===env.TEST_EXPERIMENT_ID?'test':'live'}})));
   },
 } satisfies ExportedHandler<Env>;
