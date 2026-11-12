@@ -4,6 +4,7 @@ import {nextAlarm} from '../scheduling';
 import {now,type Env} from '../domain';
 import {normalize,coveragePreference} from '../markets';
 import {POLICY} from './policy';
+import {researchPermit,storageQuotaError} from './read-budget';
 import {reformTarget} from './routing';
 import {z} from 'zod';
 import {recoveryStatus,beginRecovery,restoreChunk,finishRecovery,BACKUP_TABLES} from './recovery';
@@ -38,7 +39,7 @@ export class ReformCouncil extends DurableObject<Env>{
       if(locked&&path==='/tick')return json({paused_for_consistent_backup:true,until:backup.until});
       if(locked&&!['/admin/export-page','/api/state','/api/health','/api/events','/api/meeting','/api/document','/admin/qualification'].includes(path))return json({error:'CONSISTENT_BACKUP_IN_PROGRESS'},423);
       if(path==='/tick'){this.engine.tick();await this.arm();return json({ok:true});}
-      if(path==='/api/health')return json({state:this.repo.state(),run:this.engine.run(),health:this.repo.get('r4:health'),storage_bytes:this.ctx.storage.sql.databaseSize,scheduler:{alarm_at:await this.ctx.storage.getAlarm(),processing:this.processing},research_collector:this.repo.get('research_collector')});
+      if(path==='/api/health')return json({state:this.repo.state(),run:this.engine.run(),health:this.repo.get('r4:health'),storage_bytes:this.ctx.storage.sql.databaseSize,scheduler:{alarm_at:await this.ctx.storage.getAlarm(),processing:this.processing},last_storage_cycle:this.repo.get('r4:last_storage_cycle'),technical_repair:this.repo.get('r4:technical_repair'),research_pacing:this.repo.get('r4:research_pacing'),research_collector:this.repo.get('research_collector')});
       if(path==='/api/state'){
         const cached=this.repo.cache('r4:summary');if(cached)return json(cached);const data={...this.engine.summary(),generated_at:now()};this.repo.putCache('r4:summary',data,60);return json(data);
       }
@@ -51,6 +52,7 @@ export class ReformCouncil extends DurableObject<Env>{
         if(this.repo.get('r4:legacy_lessons'))throw Error('HISTORY_ALREADY_SEEDED');this.repo.set('r4:legacy_lessons',body);return json({stored:true,validation_samples_added:0});
       }
       if(path==='/admin/probe-azure'&&r.method==='POST')return json({azure:await this.engine.azure.ask('r4:probe:'+now(),'CHAIR','connectivity_probe',{protocol:'reform-v4',instruction:'Test technique, réponds ok true. Aucun investissement.'},z.object({ok:z.boolean()}).strict()),experiment_started:this.engine.run().started_at!==null});
+      if(path==='/admin/query-costs')return json({cycle:this.repo.get('r4:last_storage_cycle'),request:this.repo.get('r4:last_storage_request')});
       if(path==='/admin/qualification')return json(this.engine.qualification());
       if(path==='/admin/archive-observation'&&r.method==='POST'){const body:any=await r.json();const result=this.engine.archiveObservation(body.confirm);await this.arm();return json(result);}
       if(path==='/admin/start'&&r.method==='POST'){
@@ -86,9 +88,10 @@ export class ReformCouncil extends DurableObject<Env>{
     }catch(e){return json({error:e instanceof Error?e.message:'UNKNOWN_ERROR'},400);}
     finally{if(!r.headers.get('x-reform-recovery'))this.measure();}
   }
-  measure(){const backup=this.repo.get<any>('r4:backup_lock');if(backup&&Date.parse(backup.until)>Date.now())return;const day=now().slice(0,10),reads=this.repo.reads,writes=this.repo.writes;this.repo.reads=0;this.repo.writes=0;this.repo.run('INSERT INTO r4_usage VALUES(?,?,?,1) ON CONFLICT(day) DO UPDATE SET reads=reads+excluded.reads,writes=writes+excluded.writes,requests=requests+1',day,reads,writes);}
+  measure(kind='API'){try{const backup=this.repo.get<any>('r4:backup_lock');if(backup&&Date.parse(backup.until)>Date.now())return;const day=now().slice(0,10),reads=this.repo.reads,writes=this.repo.writes;const queries=this.repo.takeCosts();this.repo.reads=0;this.repo.writes=0;this.repo.set(kind==='API'?'r4:last_storage_request':'r4:last_storage_cycle',{at:now(),kind,rows_read:reads,rows_written:writes,queries});this.repo.run('INSERT INTO r4_usage VALUES(?,?,?,1) ON CONFLICT(day) DO UPDATE SET reads=reads+excluded.reads,writes=writes+excluded.writes,requests=requests+1',day,reads,writes);}catch(e){if(!storageQuotaError(e))throw e;}}
+
   async arm(){
-    const next=this.repo.one("SELECT min(CASE WHEN status='RUNNING' THEN lease_until ELSE due_at END) at FROM jobs WHERE status IN ('PENDING','RUNNING')");if(!next?.at)return;
+    const next={at:this.repo.nextJobAt()};if(!next?.at)return;
     const due=nextAlarm(await this.ctx.storage.getAlarm(),Date.parse(next.at),Date.now(),this.processing);if(due!==null)await this.ctx.storage.setAlarm(due);
   }
   async alarm(){
@@ -99,10 +102,8 @@ export class ReformCouncil extends DurableObject<Env>{
       this.engine.tick();job=this.repo.claim();if(!job)return;
       await this.ctx.storage.setAlarm(Date.parse(job.lease_until)+100);
       timer=setInterval(()=>{const old=job.lease_until;job.lease_until=new Date(Date.now()+120000).toISOString();this.repo.run("UPDATE jobs SET lease_until=? WHERE id=? AND status='RUNNING' AND lease_until=?",job.lease_until,job.id,old);this.ctx.waitUntil(this.ctx.storage.setAlarm(Date.parse(job.lease_until)+100));},30000);
-      const usage=this.repo.one('SELECT * FROM r4_usage WHERE day=?',now().slice(0,10));
-      if(usage&&(usage.reads>POLICY.freeRowsReadDaily*.8||usage.writes>POLICY.freeRowsWrittenDaily*.8)&&['R4_SCAN','R4_PREPARE','R4_FORECAST','R4_SEARCH'].includes(job.kind)){
-        this.repo.retry(job,'FREE_QUOTA_HEADROOM_RESERVED_FOR_ACCOUNTS',3600);this.engine.notify('r4:quota:'+now().slice(0,10),'Quota technique proche de la limite','La recherche ralentit pour conserver une marge aux comptes et aux règlements.',4);return;
-      }
+      const permit=researchPermit(this.repo,job,this.engine.run().policy);
+      if(!permit.allowed){this.repo.retry(job,permit.mode==='PACED'?'READ_BUDGET_PACING':'READ_BUDGET_RESERVED',permit.seconds);this.repo.run("UPDATE jobs SET attempt=max(0,attempt-1) WHERE id=? AND status='PENDING'",job.id);return;}
       if(job.kind==='R4_PREFLIGHT'){
         const category=job.payload.category,deadline=new Date(Date.now()+6*86400000).toISOString(),markets=await this.engine.markets.catalog(category,deadline);let usable=0;const errors:any[]=[],checks:any[]=[];
         const candidates=markets.flatMap(raw=>{try{const m=normalize(raw,category);return m.active&&Date.parse(m.event_end_at)>Date.now()?[m]:[];}catch(e){return [];}}).sort((a,b)=>coveragePreference(b)-coveragePreference(a));
@@ -117,6 +118,6 @@ export class ReformCouncil extends DurableObject<Env>{
       else if(job){this.repo.run("UPDATE jobs SET status='FAILED',lease_until=NULL,error=? WHERE id=?",error.slice(0,240),job.id);if(job.kind==='R4_MEETING'){const meeting=this.engine.meetingRow(job.payload.id);if(meeting)this.engine.endMeeting(meeting,'CANCELLED','Incident technique : '+error);}}
       this.repo.event((job?.id||'r4:runtime')+':error:'+(job?.attempt||0),'INCIDENT','Incident technique : '+error,'SECRETARY',job?.kind==='R4_MEETING'?job.payload.id:null);
       this.engine.notify('r4:incident:'+job?.id,'Incident au conseil',error,4);
-    }finally{if(timer)clearInterval(timer);this.processing=false;this.measure();await this.ctx.storage.deleteAlarm();await this.arm();}
+    }finally{if(timer)clearInterval(timer);this.processing=false;this.measure(job?.kind||'ALARM');await this.ctx.storage.deleteAlarm();await this.arm();}
   }
 }

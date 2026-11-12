@@ -21,9 +21,22 @@ export class ReformEngine {
   run(){return this.repo.get<Run>('reform_run')!;}
   async prepare(id:string,stage:Run['stage']){
     if(this.env.ALLOW_FIXTURES==='true')throw Error('REFORM_LIVE_PROTOCOL_REJECTS_FIXTURE_MODE');
-    const old=this.run();if(old){if(old.id!==id||old.stage!==stage)throw Error('REFORM_ID_MISMATCH');if(old.status==='READY'&&old.code_version!==this.activeCode()){old.policy=PolicySchema.parse(policyFor(stage,this.env.REFORM_ACTIVE_MODE==='true'));old.policy_hash=await hash(old.policy);old.code_version=this.activeCode();this.repo.set('reform_run',old);const s=this.repo.state()!;s.initial_eur=stage==='SHADOW'?'0':stage==='PILOT'?old.policy.pilotCapitalEur:old.policy.fullCapitalEur;this.repo.save(s);this.repo.run("DELETE FROM transient_cache WHERE key LIKE 'r4:%'");}return old;}
+    const old=this.run();if(old){if(old.id!==id||old.stage!==stage)throw Error('REFORM_ID_MISMATCH');await this.adoptReadRepair(old);if(old.status==='READY'&&old.code_version!==this.activeCode()){old.policy=PolicySchema.parse(policyFor(stage,this.env.REFORM_ACTIVE_MODE==='true'));old.policy_hash=await hash(old.policy);old.code_version=this.activeCode();this.repo.set('reform_run',old);const s=this.repo.state()!;s.initial_eur=stage==='SHADOW'?'0':stage==='PILOT'?old.policy.pilotCapitalEur:old.policy.fullCapitalEur;this.repo.save(s);this.repo.run("DELETE FROM transient_cache WHERE key LIKE 'r4:%'");}return old;}
     const policy=PolicySchema.parse(policyFor(stage,this.env.REFORM_ACTIVE_MODE==='true')),run:Run={id,stage,status:'READY',created_at:now(),started_at:null,end_at:null,evaluation_cutoff:null,policy,policy_hash:await hash(policy),code_version:this.env.CF_VERSION_METADATA?.id||'local-test',last_scan:null,qualification:null};this.repo.set('reform_run',run);
     const state:State={id,mode:'live',status:'READY',initial_eur:stage==='SHADOW'?'0':stage==='PILOT'?policy.pilotCapitalEur:policy.fullCapitalEur,created_at:now(),updated_at:now(),started_at:null,end_at:null,betting_deadline:null,fx:null,last_scan:null,last_cycle:null,emergency_day:'',emergency_count:0,last_emergency:null,last_error:null};this.repo.save(state);return run;
+  }
+  async adoptReadRepair(run:Run){
+    if(this.env.REFORM_TECHNICAL_FIX!=='read-opt-20261112'||run.id!=='survival-004-active'||run.code_version!=='5e038186-a995-46d3-8bd6-28b9e43df491'||run.policy_hash!=='bf727ff20cdb97d8893b413bbfdc0df3a94d3900dcf207869f8f46b6d9cb3cff'||this.activeCode()===run.code_version)return;
+    if(await hash(run.policy)!==run.policy_hash)throw Error('TECHNICAL_FIX_CANNOT_CHANGE_POLICY');
+    this.repo.atomic(()=>{const from=run.code_version;run.code_version=this.activeCode();this.repo.set('reform_run',run);
+      this.repo.set('r4:technical_repair',{id:'read-opt-20261112',at:now(),from,to:run.code_version,policy_hash:run.policy_hash,started_at:run.started_at,end_at:run.end_at,last_scan_before:run.last_scan,reason:'Indexed and batched reads, cached scores, paced research and latched alerts. No financial or investment-policy reset.'});
+      this.repo.run("UPDATE jobs SET status='SUPERSEDED',lease_until=NULL,error='Fresh observations required after storage interruption' WHERE status IN ('PENDING','RUNNING','PAUSED') AND kind IN ('R4_SCAN','R4_PREPARE','R4_FORECAST','R4_SEARCH')");
+      this.repo.run("DELETE FROM transient_cache WHERE key LIKE 'r4:%'");
+      this.repo.run("UPDATE notifications SET status='SUPERSEDED' WHERE status='PENDING' AND (id GLOB 'r4:stale:*' OR id GLOB 'r4:quota:*')");
+      this.repo.run("UPDATE jobs SET status='SUPERSEDED',lease_until=NULL WHERE status='PENDING' AND kind='NOTIFY' AND (json_extract(payload,'$.id') GLOB 'r4:stale:*' OR json_extract(payload,'$.id') GLOB 'r4:quota:*')");
+      this.repo.set('r4:research_incident',{open:true,since:run.last_scan||now(),reason:'Storage quota interruption'});
+      this.repo.event(run.id+':read-repair','TECHNICAL_REPAIR','Correctif des lectures de stockage autorisé par le propriétaire. Portefeuille, règles de mise et échéance conservés.');
+    });
   }
   async start(confirm:string,qualification:any=null){
     const run=this.run();if(confirm!==run.id)throw Error('EXPLICIT_EXPERIMENT_ID_REQUIRED');if(run.status!=='READY')throw Error('START_IS_NEVER_A_RESET');
@@ -56,13 +69,12 @@ export class ReformEngine {
     const run=this.run();if(!run||run.status==='READY'||run.status==='FINISHED')return;
     const bucket=Math.floor(Date.now()/(run.policy.scanMinutes*60000));
     if(this.protocolCurrent()&&run.status==='RUNNING'&&Date.now()<Date.parse(this.repo.state()!.betting_deadline!))for(const category of CATEGORIES)this.repo.enqueue(`r4:scan:${bucket}:${category}`,'R4_SCAN',{category,bucket});
-    if(this.repo.get('r4:last_tick_bucket')!==bucket){this.repo.set('r4:last_tick_bucket',bucket);this.repo.enqueue('r4:settle:'+bucket,'R4_SETTLE',{});this.repo.enqueue('r4:watch:'+bucket,'R4_WATCH',{});}
+    if(this.repo.get('r4:last_tick_bucket')!==bucket){this.repo.set('r4:last_tick_bucket',bucket);this.repo.enqueue('r4:settle:'+bucket,'R4_SETTLE',{});this.repo.enqueue('r4:watch:'+bucket,'R4_WATCH',{});this.repo.run("UPDATE jobs SET status='SUPERSEDED',error='Replaced by current scan bucket' WHERE status='PENDING' AND kind='R4_SCAN' AND CAST(json_extract(payload,'$.bucket') AS INTEGER)<?",bucket);}
     if(Date.now()>=Date.parse(run.end_at!)){
       const pending=run.stage==='SHADOW'?this.repo.one("SELECT p.id FROM r4_packets p JOIN r4_forecasts f ON f.packet_id=p.id WHERE p.status!='SETTLED' LIMIT 1"):this.repo.one("SELECT id FROM positions WHERE status='PENDING' LIMIT 1");run.status=pending?'CLOSING':'FINISHED';this.repo.set('reform_run',run);const s=this.repo.state()!;s.status=run.status;this.repo.save(s);
     }
     if(!this.protocolCurrent()){this.repo.run("UPDATE jobs SET status='PAUSED',error='FROZEN_CODE_VERSION_CHANGED' WHERE status='PENDING' AND kind IN ('R4_SCAN','R4_PREPARE','R4_FORECAST','R4_SLOT','R4_MEETING','R4_SEARCH')");this.repo.event('r4:freeze:'+this.activeCode(),'PROTOCOL_PAUSED','La version active a changé. Nouveaux avis suspendus, règlements conservés.');this.notify('r4:freeze:'+this.activeCode(),'Protocole suspendu','Le code a changé pendant une expérience. Les règlements restent suivis.',4);}
     // Polls may be replaced after an outage. Meetings and forecast snapshots never are.
-    this.repo.run("UPDATE jobs SET status='SUPERSEDED',error='A newer scan will observe current facts' WHERE status='PENDING' AND kind='R4_SCAN' AND due_at<?",new Date(Date.now()-run.policy.scanMinutes*60000).toISOString());
     this.repo.prune();
   }
   activeCode(){return this.env.CF_VERSION_METADATA?.id||'local-test';}
@@ -84,12 +96,12 @@ export class ReformEngine {
     for(const r of raw)try{const m=normalize(r,category);if(!m.active||Date.parse(m.event_end_at)<=Date.now()||Date.parse(m.event_end_at)>Date.parse(this.repo.state()!.betting_deadline!))throw Error('CALENDAR_OR_CLOSED');candidates.push(m);}catch(e){const k=String(e);counts[k]=(counts[k]||0)+1;}
     const unique=new Map<string,Market>();
     for(const m of candidates.sort((a,b)=>coveragePreference(b)-coveragePreference(a)))if(!unique.has(m.group))unique.set(m.group,m);
-    const last=(m:Market)=>this.repo.one('SELECT max(at) at FROM r4_packets WHERE event_id=?',m.group)?.at||'';
-    const selected=[...unique.values()].map(m=>({m,last:last(m)})).sort((a,b)=>a.last.localeCompare(b.last)||coveragePreference(b.m)-coveragePreference(a.m)).slice(0,this.run().policy.maximumScanCandidates);
+    const reviews=this.repo.eventReviews(),last=(m:Market)=>reviews.get(m.group)||'';
+    const selected=[...unique.values()].map(m=>({m,last:last(m)})).sort((a,b)=>a.last.localeCompare(b.last)||coveragePreference(b.m)-coveragePreference(a.m)).slice(0,this.repo.get<any>('r4:research_pacing')?.mode==='PACED'?1:this.run().policy.maximumScanCandidates);
     for(const {m} of selected){this.repo.putMarket(m);this.repo.enqueue(`r4:prepare:${bucket}:${m.id}`,'R4_PREPARE',{id:m.id,category});}
     const data={discovered:raw.length,admissible:candidates.length,events:unique.size,selected:selected.map(x=>({id:x.m.id,question:x.m.question})),exclusions:counts,coverage_note:'Bounded public catalog; relevance and source availability still checked before AI.'};
     this.repo.run('INSERT OR REPLACE INTO r4_cycles VALUES(?,?,?,?,?)',bucket,category,'DONE',now(),JSON.stringify(data));
-    this.repo.set('r4:scan:'+category,{at:now(),...data});const run=this.run();run.last_scan=now();this.repo.set('reform_run',run);
+    this.repo.set('r4:scan:'+category,{at:now(),...data});const run=this.run();run.last_scan=now();this.repo.set('reform_run',run);this.watch();
   }
   async search(category:Category,query:string){
     if(query.length<3||query.length>160)throw Error('INVALID_MARKET_SEARCH');
@@ -119,6 +131,7 @@ export class ReformEngine {
     const packetId=await hash({id,facts,baseline,protocol:this.run().policy_hash});
     const payload={market,sources,quality:q,metar,baseline,facts,policy_hash:this.run().policy_hash,previous:old?JSON.parse(old.payload).analysis||null:null};
     this.repo.putMarket(market);this.repo.run('INSERT OR IGNORE INTO r4_packets VALUES(?,?,?,?,?,?,?)',packetId,id,category,market.group,now(),q.ready&&baseline?'PREPARED':'DATA_PENDING',JSON.stringify(payload));
+    this.repo.run("DELETE FROM transient_cache WHERE key='r4:event_reviews'");
     for(const source of sources)this.repo.run('INSERT OR IGNORE INTO r4_evidence VALUES(?,?,?,?)',source.id,market.group,now(),JSON.stringify({...source,event:market.group,station:metar?.rules?.station,local_day:metar?.rules?.day,family:family(source.provider),kind:source.provider==='NOAA AWC'?'OBSERVATION':source.provider==='Polymarket'?'RULES':category==='weather'?'FORECAST':'SPORT_STATE'}));
     if(q.ready&&baseline)this.repo.enqueue('r4:forecast:'+packetId+':'+category,'R4_FORECAST',{packet:packetId,actor:category.toUpperCase()});
     else this.repo.event('r4:pending:'+packetId,'DATA_PENDING',`Dossier « ${market.question} » : ${q.essential_missing.join(' ; ')||'Référence de prix indisponible'}. Aucun appel de prévision inutile.`,category.toUpperCase(),null,{packet:packetId});
@@ -154,7 +167,8 @@ export class ReformEngine {
     }
   }
   scored(actor?:string,phase='BEFORE'):ScoredForecast[]{
-    return this.repo.rows("SELECT p.id packet_id,p.market_id,p.event_id,p.category,f.actor,f.at,f.payload forecast,json_extract(p.payload,'$.baseline.probability') baseline,o.payload outcome,o.observed_at FROM r4_forecasts f JOIN r4_packets p ON p.id=f.packet_id JOIN r4_outcomes o ON o.market_id=p.market_id WHERE f.phase=?"+(actor?' AND f.actor=?':' AND f.actor=upper(p.category)')+' ORDER BY f.at,f.packet_id',...(actor?[phase,actor]:[phase])).flatMap(r=>{const f=JSON.parse(r.forecast),o=JSON.parse(r.outcome);if(f.probability===null||!['0','1'].includes(o.payouts.YES)||r.baseline===null||r.at>=o.resolved_at)return [];return [{packet:r.packet_id,event:r.event_id,market:r.market_id,category:r.category,method:f.method_id,at:r.at,resolved_at:r.observed_at,probability:f.probability,baseline:r.baseline,outcome:Number(o.payouts.YES) as 0|1}];});
+    const key='r4:scored:'+(actor||'specialist')+':'+phase,cached=this.repo.cache<ScoredForecast[]>(key);if(cached)return cached;
+    const result=this.repo.rows("SELECT p.id packet_id,p.market_id,p.event_id,p.category,f.actor,f.at,f.payload forecast,json_extract(p.payload,'$.baseline.probability') baseline,o.payload outcome,o.observed_at FROM r4_forecasts f JOIN r4_packets p ON p.id=f.packet_id JOIN r4_outcomes o ON o.market_id=p.market_id WHERE f.phase=?"+(actor?' AND f.actor=?':' AND f.actor=upper(p.category)')+' ORDER BY f.at,f.packet_id',...(actor?[phase,actor]:[phase])).flatMap(r=>{const f=JSON.parse(r.forecast),o=JSON.parse(r.outcome);if(f.probability===null||!['0','1'].includes(o.payouts.YES)||r.baseline===null||r.at>=o.resolved_at)return [];return [{packet:r.packet_id,event:r.event_id,market:r.market_id,category:r.category,method:f.method_id,at:r.at,resolved_at:r.observed_at,probability:f.probability,baseline:r.baseline,outcome:Number(o.payouts.YES) as 0|1}];});this.repo.putCache(key,result,86400);return result;
   }
   qualification(){
     const run=this.run(),rows=this.scored(),test=evaluationWindows(rows,run.evaluation_cutoff||now()).test,cov=this.coverage();
@@ -165,7 +179,15 @@ export class ReformEngine {
   coverage(){const run=this.run(),until=new Date(Math.min(Date.now(),Date.parse(this.repo.state()?.betting_deadline||run.end_at||now()))).toISOString();return {...coverage(run.started_at,until,this.repo.rows('SELECT bucket,category,status FROM r4_cycles'),CATEGORIES,run.policy.scanMinutes),research_until:until,note:'Coverage measured during the scheduled research window, excluding the planned final settlement margin.'};}
   watch(){
     const run=this.run(),today=now().slice(0,10),usage=this.repo.one('SELECT * FROM r4_usage WHERE day=?',today)||{reads:0,writes:0,requests:0},h=healthView(run.last_scan||run.started_at,run.status==='RUNNING'&&Date.now()<Date.parse(this.repo.state()!.betting_deadline!),usage,Date.now(),run.policy);
-    this.repo.set('r4:health',h);if(h.stale){const key='r4:stale:'+Math.floor(Date.now()/1800000);this.repo.event(key,'INCIDENT','La recherche ne progresse plus au rythme attendu. Vérification du réveil et des sources requise.');this.notify(key,'Recherche en retard','Dernière recherche : '+(run.last_scan||'aucune'),4);}
+    const pacing=this.repo.get<any>('r4:research_pacing'),incident=this.repo.get<any>('r4:research_incident');
+    const mode=pacing?.day===today?pacing.mode:'NORMAL',degraded=h.stale||mode!=='NORMAL';
+    this.repo.set('r4:health',{...h,research_mode:mode,measured_at:now()});
+    if(degraded&&!incident?.open){this.repo.set('r4:research_incident',{open:true,since:now(),reason:mode==='NORMAL'?'STALE':'BUDGET'});this.repo.event(run.id+':stale:'+now(),'INCIDENT',mode==='NORMAL'?'Les recherches ont du retard.':'Les recherches sont espacées pour préserver le budget de stockage.');/* Phone research incidents are owned by the independent watchdog, avoiding duplicate senders. */}
+    else if(!degraded&&incident?.open){
+      this.repo.run("UPDATE notifications SET status='SUPERSEDED' WHERE status='PENDING' AND id GLOB 'r4:stale:*'");
+      this.repo.run("UPDATE jobs SET status='SUPERSEDED',lease_until=NULL WHERE status='PENDING' AND kind='NOTIFY' AND json_extract(payload,'$.id') GLOB 'r4:stale:*'");
+      this.repo.set('r4:research_incident',{...incident,open:false,recovered_at:now()});this.repo.event(run.id+':recovered:'+now(),'RECOVERY','Une nouvelle recherche a abouti.');
+    }
   }
   async settle(){
     const ids=this.repo.rows("SELECT market_id FROM r4_packets WHERE status!='SETTLED' AND json_extract(payload,'$.market.event_end_at')<=? AND EXISTS(SELECT 1 FROM r4_forecasts f WHERE f.packet_id=r4_packets.id) GROUP BY market_id ORDER BY min(at) LIMIT 10",now());
@@ -177,7 +199,7 @@ export class ReformEngine {
       const prior=this.repo.one('SELECT market_id FROM r4_outcomes WHERE market_id=?',id);
       const known=now(),resolved=m.resolution_evidence?.resolved_at||known;
       this.repo.run('INSERT OR IGNORE INTO r4_outcomes VALUES(?,?,?,?,?)',id,m.group,known,resolved,JSON.stringify({question:m.question,category:m.category,payouts:m.payouts,resolved_at:resolved,evidence:m.resolution_evidence}));
-      if(!prior)this.repo.run("DELETE FROM transient_cache WHERE key IN ('r4:comparisons','r4:evaluation','r4:summary')");
+      if(!prior)this.repo.invalidateScores();
       for(const p of this.repo.rows("SELECT * FROM positions WHERE market_id=? AND status='PENDING'",id))this.repo.settle(p,m);
       this.repo.run("UPDATE r4_packets SET status='SETTLED' WHERE market_id=?",id);
       this.repo.event('r4:outcome:'+id,'SETTLEMENT','Résultat officiel disponible pour « '+m.question+' ». La prévision initiale et sa pertinence restent évaluées séparément.','SECRETARY',null,{market_id:id,payouts:m.payouts});

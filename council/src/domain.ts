@@ -28,7 +28,7 @@ export const CONFIG = {
 };
 export type Env = {
  CF_VERSION_METADATA?: {id:string;tag?:string;timestamp?:string};
-  COUNCIL:DurableObjectNamespace; REFORM?:DurableObjectNamespace; REFORM_SHADOW_ID?:string; REFORM_PILOT_ID?:string; REFORM_FULL_ID?:string; REFORM_ACTIVE_MODE?:string; EXPERIMENT_ID:string; TEST_EXPERIMENT_ID?:string; AZURE_DEPLOYMENT:string;
+  COUNCIL:DurableObjectNamespace; REFORM?:DurableObjectNamespace; REFORM_SHADOW_ID?:string; REFORM_PILOT_ID?:string; REFORM_FULL_ID?:string; REFORM_ACTIVE_MODE?:string; REFORM_TECHNICAL_FIX?:string; KNOWN_STORAGE_QUOTA_RESET?:string; EXPERIMENT_ID:string; TEST_EXPERIMENT_ID?:string; AZURE_DEPLOYMENT:string;
   AZURE_ENDPOINT?:string; AZURE_KEY?:string; ADMIN_TOKEN?:string;
   PUBLIC_ORIGIN:string; ALLOW_FIXTURES?:string; NTFY_TOPIC?:string; NTFY_TOKEN?:string; NTFY_DELIVERY?:string; GITHUB_NOTIFIER_TOKEN?:string;
 };
