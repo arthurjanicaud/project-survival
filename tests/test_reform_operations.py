@@ -43,3 +43,39 @@ def test_watchdog_allows_initial_scan_warmup_but_detects_a_launch_that_never_pro
     at=datetime(2026,11,11,12,tzinfo=timezone.utc)
     assert inspect({'run':{'status':'RUNNING','started_at':'2026-11-11T11:59:00Z'}},at) is None
     assert inspect({'run':{'status':'RUNNING','started_at':'2026-11-11T11:30:00Z'}},at)
+
+
+def test_watchdog_distinguishes_deliberately_paced_research_from_an_unplanned_stall():
+    at=datetime(2026,11,12,12,tzinfo=timezone.utc)
+    h={'run':{'status':'RUNNING','last_scan':'2026-11-12T11:30:00Z'},'health':{'research_mode':'PACED'}}
+    assert 'espacée' in inspect(h,at)
+    h['run']['last_scan']='2026-11-12T10:30:00Z'
+    assert '45 minutes' in inspect(h,at)
+    assert inspect([],at)=='Réponse de santé illisible'
+
+def test_watchdog_groups_storage_failure_and_sends_only_one_alert_then_one_recovery(tmp_path,monkeypatch):
+    import httpx
+    import operations.reform_watchdog as watch
+    monkeypatch.setattr(watch,'ROOT',tmp_path)
+    monkeypatch.setattr(watch,'dotenv_values',lambda path:{})
+    monkeypatch.setenv('COUNCIL_API_URL','https://example.test')
+    monkeypatch.setenv('COUNCIL_ADMIN_TOKEN','fixture-token')
+    monkeypatch.setenv('COUNCIL_NTFY_TOPIC','fixture-topic')
+    monkeypatch.setenv('GITHUB_OUTPUT',str(tmp_path/'outputs'))
+    state={'blocked':True};sent=[]
+    class Client:
+        def __init__(self,**kwargs):pass
+        def __enter__(self):return self
+        def __exit__(self,*args):pass
+        def get(self,url,**kwargs):
+            payload={'error':'STORAGE_DAILY_QUOTA_EXCEEDED'} if state['blocked'] else {'run':{'status':'RUNNING','last_scan':datetime.now(timezone.utc).isoformat()}}
+            return httpx.Response(503 if state['blocked'] else 200,json=payload,request=httpx.Request('GET',url))
+        def post(self,url,**kwargs):
+            assert url=='https://ntfy.sh','A known daily quota must not trigger futile engine calls'
+            sent.append(kwargs['json']);return httpx.Response(200,json={},request=httpx.Request('POST',url))
+    monkeypatch.setattr(watch.httpx,'Client',Client)
+    watch.main();watch.main();assert len(sent)==1
+    assert 'storage_blocked=true' in (tmp_path/'outputs').read_text()
+    state['blocked']=False;watch.main();watch.main();assert len(sent)==2
+    assert sent[-1]['title']=='Survival : recherche rétablie'
+    assert 'storage_blocked=false' in (tmp_path/'outputs').read_text()

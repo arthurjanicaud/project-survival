@@ -33,6 +33,8 @@ Sauvegardes et restauration : voir PHASE4_GUIDE.md. Les commandes `export` cible
 
 ## Coûts et fiabilité
 
+Le [correctif de lectures du 12 novembre](PHASE4_STORAGE_REPAIR.md) documente l'incident de quota, les optimisations, les alertes sans répétition et la reprise automatique sans réinitialiser l'expérience.
+
 Les données de marché et recherches sont partagées, les contextes restent bornés et les jetons mesurés. Le collecteur conserve sa date de collecte complète lors des actualisations ciblées, afin de ne pas recommencer tout le catalogue de flux à chaque passage. Les estimations Azure ne sont pas des factures.
 
 Les mises fictives ne coûtent pas d'argent réel. Les appels Azure consomment les crédits configurés. Une semaine active peut rester sans investissement si aucun dossier ne passe les décisions et contraintes observables ; il n'existe aucune obligation cachée d'investir pour animer l'écran.

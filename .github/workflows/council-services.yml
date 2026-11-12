@@ -22,16 +22,23 @@ jobs:
         with:
           python-version: '3.12'
       - run: pip install httpx python-dotenv
-      - uses: actions/cache@v4
+      - uses: actions/cache/restore@v4
         with:
           path: data/reform-watchdog.json
           key: reform-watchdog-${{ github.run_id }}
           restore-keys: reform-watchdog-
       - name: Check independent progress
+        id: watchdog
         run: python operations/reform_watchdog.py
       - name: Relay phone notifications
+        if: steps.watchdog.outputs.storage_blocked != 'true'
         run: python operations/council_collect.py notifications
       - name: Collect shared public research
-        if: github.event_name == 'workflow_dispatch' || github.event.schedule == '*/5 * * * *'
+        if: steps.watchdog.outputs.storage_blocked != 'true' && (github.event_name == 'workflow_dispatch' || github.event.schedule == '*/5 * * * *')
         # Collector itself checks the last feed timestamp; no LLM or trading job.
         run: python operations/council_collect.py research
+      - uses: actions/cache/save@v4
+        if: always() && hashFiles('data/reform-watchdog.json') != ''
+        with:
+          path: data/reform-watchdog.json
+          key: reform-watchdog-${{ github.run_id }}

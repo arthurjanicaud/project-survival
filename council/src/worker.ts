@@ -1,3 +1,4 @@
+import {storageQuotaError,quotaResponse,knownStoragePause} from './reform/read-budget';
 import {DurableObject} from 'cloudflare:workers';
 import {Repository} from './repository';
 import {Engine} from './engine';
@@ -121,7 +122,7 @@ export class Council extends DurableObject<Env>{
   }
   async arm(){
     if(this.repo.get('recovery_readonly'))return;
-    const j=this.repo.one("SELECT min(CASE WHEN status='RUNNING' THEN lease_until ELSE due_at END) at FROM jobs WHERE status IN ('PENDING','RUNNING')");
+    const j={at:this.repo.nextJobAt()};
     if(j?.at){const old=await this.ctx.storage.getAlarm(),due=nextAlarm(old,Date.parse(j.at),Date.now(),this.processing);if(due!==null){await this.ctx.storage.setAlarm(due);if(old!==null&&old<Date.now()-5000)this.repo.event('alarm-recovery:'+old,'RECOVERY','Le contrôle périodique a réarmé un réveil technique périmé. Les tâches reprennent sans réinitialiser le portefeuille.','SECRETARY',null,{previous_alarm_at:new Date(old).toISOString(),new_alarm_at:new Date(due).toISOString()});}}
   }
   async alarm(){
@@ -172,9 +173,16 @@ export class Council extends DurableObject<Env>{
   webSocketMessage(ws:WebSocket,message:string|ArrayBuffer){if(message==='ping')ws.send('pong');}
   webSocketClose(ws:WebSocket,code:number){ws.close(code,'Closed');}
 }
+let storageCircuitUntil=0;
+async function observeStorage(response:Response){
+  if(!response.ok){const body:any=await response.clone().json().catch(()=>null);if(storageQuotaError(body?.error)){storageCircuitUntil=Date.now()+300000;return quotaResponse();}}
+  return response;
+}
+function quotaWithCors(r:Request,env:Env){const response=quotaResponse();for(const [k,v] of Object.entries(cors(r,env)))response.headers.set(k,v);return response;}
 export default {
   async fetch(r:Request,env:Env){
     const u=new URL(r.url),admin=u.pathname.startsWith('/admin/');
+    if(knownStoragePause(env.KNOWN_STORAGE_QUOTA_RESET)||Date.now()<storageCircuitUntil)return quotaWithCors(r,env);
     if(r.method==='OPTIONS')return new Response(null,{headers:cors(r,env)});
     if(admin&&!await authorized(r,env))return json({error:'UNAUTHORIZED'},401);
     if(!admin&&!u.pathname.startsWith('/api/'))return json({error:'NOT_FOUND'},404);
@@ -182,10 +190,10 @@ export default {
       if(!env.REFORM)return json({error:'REFORM_NOT_DEPLOYED'},503);
       try{const target=reformTarget(u.searchParams.get('stage'),env),headers=new Headers(r.headers);headers.set('x-reform-stage',target.stage.toLowerCase());
         const recovery=admin?u.searchParams.get('instance'):null;if(recovery&&!/^recovery-r4-[a-zA-Z0-9-]{1,50}$/.test(recovery))throw Error('INVALID_RECOVERY_ID');headers.delete('x-reform-recovery');if(recovery)headers.set('x-reform-recovery',recovery);
-        const result=await env.REFORM.get(env.REFORM.idFromName(recovery||target.id)).fetch(new Request(r,{headers})),out=new Response(result.body,result);for(const [k,v]of Object.entries(cors(r,env)))out.headers.set(k,v);return out;
-      }catch(e){return json({error:(e as Error).message},400);}
+        const result=await observeStorage(await env.REFORM.get(env.REFORM.idFromName(recovery||target.id)).fetch(new Request(r,{headers}))),out=new Response(result.body,result);for(const [k,v]of Object.entries(cors(r,env)))out.headers.set(k,v);return out;
+      }catch(e){if(storageQuotaError(e)){storageCircuitUntil=Date.now()+300000;return quotaWithCors(r,env);}return json({error:(e as Error).message},400);}
     }
-    let target;try{target=boardTarget(u,admin,env);}catch(e){return json({error:(e as Error).message},400);}
+    let target;try{target=boardTarget(u,admin,env);}catch(e){if(storageQuotaError(e)){storageCircuitUntil=Date.now()+300000;return quotaWithCors(r,env);}return json({error:(e as Error).message},400);}
     const headers=new Headers(r.headers);headers.set('x-board-id',target.id);headers.set('x-board-mode',target.mode);
     const reformFeed=env.REFORM&&admin&&u.pathname==='/admin/research'?r.clone():null;
     const mirror=admin&&u.pathname==='/admin/research'&&target.id===env.EXPERIMENT_ID&&env.TEST_EXPERIMENT_ID?r.clone():null;
@@ -218,7 +226,8 @@ export default {
     const out=new Response(response.body,response);for(const [k,v]of Object.entries(cors(r,env)))out.headers.set(k,v);return out;
   },
   async scheduled(_c:ScheduledController,env:Env,ctx:ExecutionContext){
-    if(env.REFORM)for(const stage of ['shadow','pilot','full']){const target=reformTarget(stage,env);ctx.waitUntil(env.REFORM.get(env.REFORM.idFromName(target.id)).fetch(new Request('https://internal/tick',{headers:{'x-reform-stage':stage}})));}
+    if(knownStoragePause(env.KNOWN_STORAGE_QUOTA_RESET)||Date.now()<storageCircuitUntil)return;
+    if(env.REFORM)for(const stage of ['shadow','pilot','full']){const target=reformTarget(stage,env);ctx.waitUntil(env.REFORM.get(env.REFORM.idFromName(target.id)).fetch(new Request('https://internal/tick',{headers:{'x-reform-stage':stage}})).then(observeStorage).catch(e=>{if(storageQuotaError(e))storageCircuitUntil=Date.now()+300000;else throw e;}));}
     for(const id of [env.EXPERIMENT_ID,env.TEST_EXPERIMENT_ID].filter(Boolean) as string[])ctx.waitUntil(env.COUNCIL.get(env.COUNCIL.idFromName(id)).fetch(new Request('https://internal/tick',{headers:{'x-board-id':id,'x-board-mode':id===env.TEST_EXPERIMENT_ID?'test':'live'}})));
   },
 } satisfies ExportedHandler<Env>;

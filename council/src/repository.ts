@@ -30,6 +30,7 @@ export class Repository {
     'CREATE INDEX IF NOT EXISTS jobs_lease ON jobs(status,lease_until)',
     'CREATE TABLE IF NOT EXISTS calls(id TEXT PRIMARY KEY,actor TEXT NOT NULL,meeting_id TEXT,created_at TEXT NOT NULL,status TEXT NOT NULL,input_tokens INTEGER NOT NULL DEFAULT 0,output_tokens INTEGER NOT NULL DEFAULT 0,cached_tokens INTEGER NOT NULL DEFAULT 0,cache_write_tokens INTEGER NOT NULL DEFAULT 0,estimated_eur TEXT,result TEXT,error TEXT)',
     'CREATE TABLE IF NOT EXISTS notifications(id TEXT PRIMARY KEY,created_at TEXT NOT NULL,status TEXT NOT NULL,attempt INTEGER NOT NULL DEFAULT 0,payload TEXT NOT NULL,error TEXT)',
+    'CREATE INDEX IF NOT EXISTS notifications_pending ON notifications(status,created_at)',
     'CREATE TABLE IF NOT EXISTS transient_cache(key TEXT PRIMARY KEY,expires_at TEXT NOT NULL,payload TEXT NOT NULL)',
     'CREATE INDEX IF NOT EXISTS cache_expiry ON transient_cache(expires_at)',
     "CREATE TRIGGER IF NOT EXISTS ledger_no_update BEFORE UPDATE ON ledger BEGIN SELECT RAISE(ABORT,'APPEND_ONLY_LEDGER'); END",
@@ -89,6 +90,11 @@ export class Repository {
   });}
   complete(job:any){this.run("UPDATE jobs SET status='DONE',lease_until=NULL WHERE id=? AND lease_until=?",job.id,job.lease_until);}
   retry(job:any,error:string,seconds=30){this.run("UPDATE jobs SET status='PENDING',lease_until=NULL,due_at=?,error=? WHERE id=? AND lease_until=?",new Date(Date.now()+seconds*1000).toISOString(),error.slice(0,240),job.id,job.lease_until);}
+  nextJobAt(){
+    const pending=this.one("SELECT due_at at FROM jobs WHERE status='PENDING' ORDER BY due_at LIMIT 1")?.at;
+    const running=this.one("SELECT lease_until at FROM jobs WHERE status='RUNNING' AND lease_until IS NOT NULL ORDER BY lease_until LIMIT 1")?.at;
+    return [pending,running].filter(Boolean).sort()[0]||null;
+  }
   cash(){return this.rows('SELECT amount FROM ledger').reduce((n,r)=>n.plus(r.amount),D(0)).toFixed();}
   consumed(asset:string,hash:string){const result:Record<string,string>={};for(const f of this.rows('SELECT price,quantity FROM fills WHERE asset_id=? AND book_hash=?',asset,hash))result[f.price]=D(result[f.price]||0).plus(f.quantity).toFixed();return result;}
   buy(p:Proposal,m:any,e:Execution,reason:string){return this.atomic(()=>{
