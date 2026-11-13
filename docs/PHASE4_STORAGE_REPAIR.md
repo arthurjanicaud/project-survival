@@ -41,3 +41,26 @@ Il conserve la même base, le journal financier, les positions, les règles de m
 Le cron Cloudflare réessaie les réveils et le watchdog GitHub continue ses contrôles. La reprise effective doit être confirmée par un nouveau last_scan et les lectures des cycles de production après la remise à zéro. La date de fin reste le 18 novembre à 16:19 Paris.
 
 Source du plafond et du reset fournisseur : https://developers.cloudflare.com/durable-objects/platform/pricing/
+
+## Nouvel incident du 13 novembre : écritures
+
+Les métriques officielles GraphQL `durableObjectsPeriodicGroups` montrent le renouvellement du quota : le 13 novembre UTC, le namespace ReformCouncil a consommé 565 252 lectures et 109 521 écritures, contre 51 300 lectures et 305 écritures pour Council (mesure vers 15:55 UTC). L'essentiel des nouvelles écritures s'est produit entre 01:00 et 02:00 UTC. Le plafond quotidien d'écritures est de 100 000 pour le compte. Ce nouvel incident ne résulte donc pas d'un quota de lectures resté bloqué la veille.
+
+Un endpoint privé sans migrations, préparation d'expérience, mesure persistante ni réveil a été déployé pour lire l'état. Même ses seuls SELECT échouent avec `Exceeded allowed rows written in Durable Objects free tier.` L'état financier courant et les dernières requêtes ne sont donc pas récupérables par cet accès tant que le fournisseur refuse SQL. Aucun export réussi ni nouvelle activité n'est annoncé.
+
+L'audit du code identifie une boucle de croissance possible : une erreur d'un job NOTIFY créait une notification d'incident, donc un nouveau job NOTIFY. Le déclenchement du relais utilisait en outre l'ancien propriétaire GitHub. Faute d'accès SQL aux erreurs historiques, on ne peut pas attribuer avec certitude toutes les écritures de production à cette seule boucle.
+
+Corrections du 13 novembre :
+
+- Une erreur de notification reste journalisée et ne génère jamais une autre notification. En phase 4 avec github-relay, les jobs de notification ne déclenchent plus eux-mêmes de workflow : le consommateur planifié toutes les cinq minutes conserve cette responsabilité.
+- Les adresses de déclenchement du moteur historique visent le dépôt canonique `arthurjanicaud/project-survival`.
+- Les anciens jobs et messages récursifs sont exclus de la sélection, du calcul du prochain réveil et de l'envoi. Leur historique est conservé. L'amendement ne modifie qu'au plus 20 anciennes notifications et 20 jobs ; aucune purge massive ne consomme le nouveau quota.
+- L'insertion d'un événement déjà connu s'arrête avant INSERT OR IGNORE : SQLite n'avance plus AUTOINCREMENT sur chaque doublon.
+- La purge du cache est limitée à 100 entrées par dix minutes et par instance active ; le journal financier n'est pas concerné.
+- La télémétrie des requêtes HTTP est regroupée au maximum une fois par minute. Les diagnostics de coût affichent aussi les requêtes les plus coûteuses en écritures.
+- Une erreur de quota dans une alarme n'essaie plus d'écrire un autre incident ou d'entretenir le réveil en échec. Les accès externes sont suspendus jusqu'au 14 novembre 00:00 UTC, soit 01:00 Paris, puis le cron retente automatiquement.
+- La préparation/adoption technique est aussi exécutée au réveil d'une alarme, avant de traiter les tâches.
+
+L'amendement `write-opt-20261113` n'accepte que les deux versions précédentes explicitement identifiées (`5e038186-a995-46d3-8bd6-28b9e43df491` et `c85214f3-946f-441b-bbd3-316f16ea4b0f`), l'identifiant `survival-004-active` et la même empreinte de politique. Une version ultérieure non autorisée reste suspendue. Aucun START, changement de capital, pari, restauration ou prolongation n'est effectué.
+
+Commande privée de contrôle après renouvellement : `python operations/reform_admin.py storage-diagnostic --stage full`. La reprise ne sera effective qu'après un nouveau `last_scan` réel ; le watchdog indépendant doit la constater. Les tests locaux vérifient 1 000 doublons sans nouvelle écriture, l'absence de récursion après un échec d'envoi, l'exclusion de 1 000 anciens jobs récursifs, le bornage de la maintenance et la conservation des comptes pendant l'adoption.

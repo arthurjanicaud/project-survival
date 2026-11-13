@@ -182,7 +182,7 @@ function quotaWithCors(r:Request,env:Env){const response=quotaResponse();for(con
 export default {
   async fetch(r:Request,env:Env){
     const u=new URL(r.url),admin=u.pathname.startsWith('/admin/');
-    if(knownStoragePause(env.KNOWN_STORAGE_QUOTA_RESET)||Date.now()<storageCircuitUntil)return quotaWithCors(r,env);
+    if(u.pathname!=='/admin/storage-diagnostic'&&(knownStoragePause(env.KNOWN_STORAGE_QUOTA_RESET)||Date.now()<storageCircuitUntil))return quotaWithCors(r,env);
     if(r.method==='OPTIONS')return new Response(null,{headers:cors(r,env)});
     if(admin&&!await authorized(r,env))return json({error:'UNAUTHORIZED'},401);
     if(!admin&&!u.pathname.startsWith('/api/'))return json({error:'NOT_FOUND'},404);
@@ -190,8 +190,9 @@ export default {
       if(!env.REFORM)return json({error:'REFORM_NOT_DEPLOYED'},503);
       try{const target=reformTarget(u.searchParams.get('stage'),env),headers=new Headers(r.headers);headers.set('x-reform-stage',target.stage.toLowerCase());
         const recovery=admin?u.searchParams.get('instance'):null;if(recovery&&!/^recovery-r4-[a-zA-Z0-9-]{1,50}$/.test(recovery))throw Error('INVALID_RECOVERY_ID');headers.delete('x-reform-recovery');if(recovery)headers.set('x-reform-recovery',recovery);
-        const result=await observeStorage(await env.REFORM.get(env.REFORM.idFromName(recovery||target.id)).fetch(new Request(r,{headers}))),out=new Response(result.body,result);for(const [k,v]of Object.entries(cors(r,env)))out.headers.set(k,v);return out;
-      }catch(e){if(storageQuotaError(e)){storageCircuitUntil=Date.now()+300000;return quotaWithCors(r,env);}return json({error:(e as Error).message},400);}
+        const raw=await env.REFORM.get(env.REFORM.idFromName(recovery||target.id)).fetch(new Request(r,{headers}));
+        const result=u.pathname==='/admin/storage-diagnostic'?raw:await observeStorage(raw),out=new Response(result.body,result);for(const [k,v]of Object.entries(cors(r,env)))out.headers.set(k,v);return out;
+      }catch(e){if(u.pathname==='/admin/storage-diagnostic')return json({error:String(e),read_only:true},503);if(storageQuotaError(e)){storageCircuitUntil=Date.now()+300000;return quotaWithCors(r,env);}return json({error:(e as Error).message},400);}
     }
     let target;try{target=boardTarget(u,admin,env);}catch(e){if(storageQuotaError(e)){storageCircuitUntil=Date.now()+300000;return quotaWithCors(r,env);}return json({error:(e as Error).message},400);}
     const headers=new Headers(r.headers);headers.set('x-board-id',target.id);headers.set('x-board-mode',target.mode);

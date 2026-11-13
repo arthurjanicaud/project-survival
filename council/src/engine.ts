@@ -500,14 +500,14 @@ export class Engine {
     if(!this.env.GITHUB_NOTIFIER_TOKEN||!this.repo.one("SELECT id FROM notifications WHERE status='PENDING' LIMIT 1"))return;
     const old=this.repo.get<any>('notification_relay');
     if(old?.dispatched_at&&Date.now()-Date.parse(old.dispatched_at)<30000){this.repo.enqueue('notification-relay:'+old.dispatched_at,'NOTIFY_RELAY',{},new Date(Date.parse(old.dispatched_at)+31000).toISOString());return;}
-    const r=await fetch('https://api.github.com/repos/arthurjanicaudschool/project-survival/actions/workflows/council-services.yml/dispatches',{method:'POST',headers:{Authorization:'Bearer '+this.env.GITHUB_NOTIFIER_TOKEN,'Accept':'application/vnd.github+json','Content-Type':'application/json','User-Agent':'ProjectSurvivalCouncil'},body:JSON.stringify({ref:'main'}),signal:AbortSignal.timeout(12000)});
+    const r=await fetch('https://api.github.com/repos/arthurjanicaud/project-survival/actions/workflows/council-services.yml/dispatches',{method:'POST',headers:{Authorization:'Bearer '+this.env.GITHUB_NOTIFIER_TOKEN,'Accept':'application/vnd.github+json','Content-Type':'application/json','User-Agent':'ProjectSurvivalCouncil'},body:JSON.stringify({ref:'main'}),signal:AbortSignal.timeout(12000)});
     await r.body?.cancel();
     this.repo.set('notification_relay',{at:now(),dispatched_at:r.status===204?now():old?.dispatched_at||null,status:r.status===204?'DISPATCHED':'ERROR',http_status:r.status});
     if(r.status!==204)throw Error('NOTIFICATION_RELAY_HTTP_'+r.status);
   }
   async dispatchResearch(){
     if(!this.env.GITHUB_NOTIFIER_TOKEN)return;
-    const r=await fetch('https://api.github.com/repos/arthurjanicaudschool/project-survival/actions/workflows/council-services.yml/dispatches',{method:'POST',headers:{Authorization:'Bearer '+this.env.GITHUB_NOTIFIER_TOKEN,'Accept':'application/vnd.github+json','Content-Type':'application/json','User-Agent':'ProjectSurvivalResearchScheduler'},body:JSON.stringify({ref:'main'}),signal:AbortSignal.timeout(12000)});
+    const r=await fetch('https://api.github.com/repos/arthurjanicaud/project-survival/actions/workflows/council-services.yml/dispatches',{method:'POST',headers:{Authorization:'Bearer '+this.env.GITHUB_NOTIFIER_TOKEN,'Accept':'application/vnd.github+json','Content-Type':'application/json','User-Agent':'ProjectSurvivalResearchScheduler'},body:JSON.stringify({ref:'main'}),signal:AbortSignal.timeout(12000)});
     await r.body?.cancel();this.repo.set('research_dispatch',{at:now(),dispatched_at:r.status===204?now():null,http_status:r.status});if(r.status!==204)throw Error('RESEARCH_DISPATCH_HTTP_'+r.status);
   }
   summary(){
