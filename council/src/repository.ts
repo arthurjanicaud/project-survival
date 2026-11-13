@@ -42,6 +42,9 @@ export class Repository {
   state(){return this.get<State>('state');}
   save(s:State){s.updated_at=now();this.set('state',s);}
   event(id:string,kind:string,text:string,actor='SECRETARY',meeting:string|null=null,details:unknown={}){
+    // INSERT OR IGNORE still advances SQLite's AUTOINCREMENT sequence on a
+    // duplicate. Repeated heartbeats must be genuinely read-only here.
+    const existing=this.one('SELECT * FROM events WHERE id=?',id);if(existing)return existing;
     this.run('INSERT OR IGNORE INTO events(id,at,meeting_id,kind,actor,text,details) VALUES(?,?,?,?,?,?,?)',id,now(),meeting,kind,actor,text,JSON.stringify(details));
     const saved=this.one('SELECT * FROM events WHERE id=?',id);this.onEvent?.(id);return saved;
   }
@@ -81,8 +84,8 @@ export class Repository {
     // Keep one due poll per category/type after an outage; archive superseded jobs.
     this.run("UPDATE jobs SET status='SUPERSEDED',error='Replaced by a more recent poll after backlog recovery' WHERE id IN (SELECT id FROM (SELECT id,row_number() OVER(PARTITION BY kind,coalesce(json_extract(payload,'$.category'),''),CASE WHEN kind='SETTLE_FUNDS' THEN payload ELSE '' END ORDER BY due_at DESC,id DESC) n FROM jobs WHERE status='PENDING' AND due_at<=? AND kind IN ('SCAN','SETTLE','SETTLE_FUNDS','RESEARCH_DISPATCH')) WHERE n>1)",at);
   }
-  claim(at=now()):any|null{return this.atomic(()=>{
-    const job=this.one("SELECT * FROM jobs WHERE (status='PENDING' AND due_at<=?) OR (status='RUNNING' AND lease_until<?) ORDER BY CASE kind WHEN 'R4_SETTLE' THEN 0 WHEN 'R4_MEETING' THEN 1 WHEN 'R4_SLOT' THEN 2 WHEN 'R4_WATCH' THEN 3 WHEN 'R4_SCAN' THEN 4 WHEN 'R4_PREPARE' THEN 5 WHEN 'R4_FORECAST' THEN 5 WHEN 'R4_SEARCH' THEN 6 WHEN 'SETTLE' THEN 0 WHEN 'SETTLE_FUNDS' THEN 0 WHEN 'MEETING' THEN 1 WHEN 'SLOT' THEN 2 WHEN 'EMERGENCY' THEN 2 WHEN 'NOTIFY' THEN 3 ELSE 4 END,due_at LIMIT 1",at,at);
+  claim(at=now(),ignoreRecursive=false):any|null{return this.atomic(()=>{
+    const job=this.one("SELECT * FROM jobs WHERE ((status='PENDING' AND due_at<=?) OR (status='RUNNING' AND lease_until<?))"+(ignoreRecursive?" AND id NOT GLOB 'notify:r4:incident:notify:*'":"")+" ORDER BY CASE kind WHEN 'R4_SETTLE' THEN 0 WHEN 'R4_MEETING' THEN 1 WHEN 'R4_SLOT' THEN 2 WHEN 'R4_WATCH' THEN 3 WHEN 'R4_SCAN' THEN 4 WHEN 'R4_PREPARE' THEN 5 WHEN 'R4_FORECAST' THEN 5 WHEN 'R4_SEARCH' THEN 6 WHEN 'SETTLE' THEN 0 WHEN 'SETTLE_FUNDS' THEN 0 WHEN 'MEETING' THEN 1 WHEN 'SLOT' THEN 2 WHEN 'EMERGENCY' THEN 2 WHEN 'NOTIFY' THEN 3 ELSE 4 END,due_at LIMIT 1",at,at);
     if(!job)return null;
     const lease=new Date(Date.parse(at)+120000).toISOString();
     this.run("UPDATE jobs SET status='RUNNING',lease_until=?,attempt=attempt+1 WHERE id=?",lease,job.id);
@@ -90,9 +93,10 @@ export class Repository {
   });}
   complete(job:any){this.run("UPDATE jobs SET status='DONE',lease_until=NULL WHERE id=? AND lease_until=?",job.id,job.lease_until);}
   retry(job:any,error:string,seconds=30){this.run("UPDATE jobs SET status='PENDING',lease_until=NULL,due_at=?,error=? WHERE id=? AND lease_until=?",new Date(Date.now()+seconds*1000).toISOString(),error.slice(0,240),job.id,job.lease_until);}
-  nextJobAt(){
-    const pending=this.one("SELECT due_at at FROM jobs WHERE status='PENDING' ORDER BY due_at LIMIT 1")?.at;
-    const running=this.one("SELECT lease_until at FROM jobs WHERE status='RUNNING' AND lease_until IS NOT NULL ORDER BY lease_until LIMIT 1")?.at;
+  nextJobAt(ignoreRecursive=false){
+    const filter=ignoreRecursive?" AND id NOT GLOB 'notify:r4:incident:notify:*'":"";
+    const pending=this.one("SELECT due_at at FROM jobs WHERE status='PENDING'"+filter+" ORDER BY due_at LIMIT 1")?.at;
+    const running=this.one("SELECT lease_until at FROM jobs WHERE status='RUNNING' AND lease_until IS NOT NULL"+filter+" ORDER BY lease_until LIMIT 1")?.at;
     return [pending,running].filter(Boolean).sort()[0]||null;
   }
   cash(){return this.rows('SELECT amount FROM ledger').reduce((n,r)=>n.plus(r.amount),D(0)).toFixed();}
@@ -138,7 +142,8 @@ export class Repository {
   notify(id:string,title:string,message:string,url:string,priority=3){if(this.state()?.mode==='test'){title='[TEST 24H] '+title;const link=new URL(url);link.searchParams.set('experiment','test');url=link.href;}this.run("INSERT OR IGNORE INTO notifications VALUES(?,?,'PENDING',0,?,NULL)",id,now(),JSON.stringify({title,message,url,priority}));this.enqueue('notify:'+id,'NOTIFY',{id});}
   cache<T=any>(key:string):T|null{const r=this.one('SELECT payload FROM transient_cache WHERE key=? AND expires_at>?',key,now());return r?JSON.parse(r.payload):null;}
   putCache(key:string,payload:any,seconds=3600){this.run('INSERT INTO transient_cache VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET expires_at=excluded.expires_at,payload=excluded.payload',key,new Date(Date.now()+seconds*1000).toISOString(),JSON.stringify(payload));}
-  prune(){this.run('DELETE FROM transient_cache WHERE expires_at<?',now());/* Financial, document and meeting evidence is never pruned. */}
+  private lastPrune=0;
+  prune(){if(Date.now()-this.lastPrune<600000)return;this.lastPrune=Date.now();this.run('DELETE FROM transient_cache WHERE key IN (SELECT key FROM transient_cache WHERE expires_at<? ORDER BY expires_at LIMIT 100)',now());/* Financial, document and meeting evidence is never pruned. */}
   exportPage(table:string,after=0,limit=100){
     const allowed=['meta','documents','markets','dossiers','meetings','proposals','votes','events','ledger','positions','fills','counterfactuals','jobs','calls','notifications'];
     if(!allowed.includes(table))throw Error('INVALID_EXPORT_TABLE');

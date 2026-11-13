@@ -26,16 +26,21 @@ export class ReformEngine {
     const state:State={id,mode:'live',status:'READY',initial_eur:stage==='SHADOW'?'0':stage==='PILOT'?policy.pilotCapitalEur:policy.fullCapitalEur,created_at:now(),updated_at:now(),started_at:null,end_at:null,betting_deadline:null,fx:null,last_scan:null,last_cycle:null,emergency_day:'',emergency_count:0,last_emergency:null,last_error:null};this.repo.save(state);return run;
   }
   async adoptReadRepair(run:Run){
-    if(this.env.REFORM_TECHNICAL_FIX!=='read-opt-20261112'||run.id!=='survival-004-active'||run.code_version!=='5e038186-a995-46d3-8bd6-28b9e43df491'||run.policy_hash!=='bf727ff20cdb97d8893b413bbfdc0df3a94d3900dcf207869f8f46b6d9cb3cff'||this.activeCode()===run.code_version)return;
+    const repair=this.env.REFORM_TECHNICAL_FIX,allowed=repair==='write-opt-20261113'?['5e038186-a995-46d3-8bd6-28b9e43df491','c85214f3-946f-441b-bbd3-316f16ea4b0f']:repair==='read-opt-20261112'?['5e038186-a995-46d3-8bd6-28b9e43df491']:[];
+    if(run.id!=='survival-004-active'||!allowed.includes(run.code_version)||run.policy_hash!=='bf727ff20cdb97d8893b413bbfdc0df3a94d3900dcf207869f8f46b6d9cb3cff'||this.activeCode()===run.code_version)return;
     if(await hash(run.policy)!==run.policy_hash)throw Error('TECHNICAL_FIX_CANNOT_CHANGE_POLICY');
     this.repo.atomic(()=>{const from=run.code_version;run.code_version=this.activeCode();this.repo.set('reform_run',run);
-      this.repo.set('r4:technical_repair',{id:'read-opt-20261112',at:now(),from,to:run.code_version,policy_hash:run.policy_hash,started_at:run.started_at,end_at:run.end_at,last_scan_before:run.last_scan,reason:'Indexed and batched reads, cached scores, paced research and latched alerts. No financial or investment-policy reset.'});
+      this.repo.set('r4:technical_repair',{id:repair,at:now(),from,to:run.code_version,policy_hash:run.policy_hash,started_at:run.started_at,end_at:run.end_at,last_scan_before:run.last_scan,reason:'Storage repair: indexed reads, non-recursive notifications, bounded maintenance. No financial or investment-policy reset.'});
       this.repo.run("UPDATE jobs SET status='SUPERSEDED',lease_until=NULL,error='Fresh observations required after storage interruption' WHERE status IN ('PENDING','RUNNING','PAUSED') AND kind IN ('R4_SCAN','R4_PREPARE','R4_FORECAST','R4_SEARCH')");
       this.repo.run("DELETE FROM transient_cache WHERE key LIKE 'r4:%'");
       this.repo.run("UPDATE notifications SET status='SUPERSEDED' WHERE status='PENDING' AND (id GLOB 'r4:stale:*' OR id GLOB 'r4:quota:*')");
       this.repo.run("UPDATE jobs SET status='SUPERSEDED',lease_until=NULL WHERE status='PENDING' AND kind='NOTIFY' AND (json_extract(payload,'$.id') GLOB 'r4:stale:*' OR json_extract(payload,'$.id') GLOB 'r4:quota:*')");
       this.repo.set('r4:research_incident',{open:true,since:run.last_scan||now(),reason:'Storage quota interruption'});
-      this.repo.event(run.id+':read-repair','TECHNICAL_REPAIR','Correctif des lectures de stockage autorisé par le propriétaire. Portefeuille, règles de mise et échéance conservés.');
+      if(repair==='write-opt-20261113'){
+        this.repo.run("UPDATE notifications SET status='SUPERSEDED' WHERE id IN (SELECT id FROM notifications WHERE status='PENDING' AND id GLOB 'r4:incident:notify:*' LIMIT 20)");
+        this.repo.run("UPDATE jobs SET status='SUPERSEDED',lease_until=NULL,error='Recursive notification delivery superseded by technical repair' WHERE id IN (SELECT id FROM jobs WHERE status IN ('PENDING','RUNNING') AND id GLOB 'notify:r4:incident:notify:*' LIMIT 20)");
+      }
+      this.repo.event(run.id+':'+repair,'TECHNICAL_REPAIR','Correctif technique du stockage autorisé par le propriétaire. Portefeuille, règles de mise et échéance conservés.');
     });
   }
   async start(confirm:string,qualification:any=null){

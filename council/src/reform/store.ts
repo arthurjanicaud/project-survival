@@ -1,9 +1,11 @@
 import {Repository} from '../repository';
 import type {Source} from '../domain';
 export class ReformRepository extends Repository {
+  override claim(at?:string){return super.claim(at,true);}
+  override nextJobAt(){return super.nextJobAt(true);}
   private costs=new Map<string,{query:string;calls:number;reads:number;writes:number}>();
   override rows<T=any>(q:string,...args:any[]):T[]{const reads=this.reads,writes=this.writes,result=super.rows<T>(q,...args);if(this.costs){const key=q.replace(/\s+/g,' ').trim(),c=this.costs.get(key)||{query:key,calls:0,reads:0,writes:0};c.calls++;c.reads+=this.reads-reads;c.writes+=this.writes-writes;this.costs.set(key,c);}return result;}
-  takeCosts(){const rows=[...this.costs.values()].sort((a,b)=>b.reads-a.reads).slice(0,5);this.costs.clear();return rows;}
+  takeCosts(){const all=[...this.costs.values()],reads=all.sort((a,b)=>b.reads-a.reads).slice(0,5),writes=[...all].sort((a,b)=>b.writes-a.writes).slice(0,5);this.costs.clear();return [...new Map([...reads,...writes].map(q=>[q.query,q])).values()];}
 
   // Collection caches are transient; only accepted packets pin evidence below.
   document(_source:Source){}

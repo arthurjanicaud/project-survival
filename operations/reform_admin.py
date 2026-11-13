@@ -9,8 +9,8 @@ ROOT=Path(__file__).resolve().parents[1]
 TABLES=['meta','documents','markets','ledger','positions','fills','proposals','votes','calls','events','notifications','jobs','r4_packets','r4_evidence','r4_forecasts','r4_outcomes','r4_cycles','r4_assessments','r4_agendas','r4_models','r4_usage']
 def configuration():return {**dotenv_values(ROOT/'.env'),**os.environ}
 def request(command,stage='full',data=None):
-    cfg=configuration();paths={'state':'/api/state','health':'/api/health','start':'/admin/start','archive-observation':'/admin/archive-observation','preflight':'/admin/preflight','tick':'/admin/tick','qualification':'/admin/qualification','seed-history':'/admin/seed-history','probe-azure':'/admin/probe-azure'}
-    method='GET' if command in ['state','health','qualification'] else 'POST'
+    cfg=configuration();paths={'state':'/api/state','health':'/api/health','storage-diagnostic':'/admin/storage-diagnostic','start':'/admin/start','archive-observation':'/admin/archive-observation','preflight':'/admin/preflight','tick':'/admin/tick','qualification':'/admin/qualification','seed-history':'/admin/seed-history','probe-azure':'/admin/probe-azure'}
+    method='GET' if command in ['state','health','qualification','storage-diagnostic'] else 'POST'
     r=httpx.request(method,cfg['COUNCIL_API_URL']+paths[command],params={'phase':'4','stage':stage},headers={'Authorization':'Bearer '+cfg['COUNCIL_ADMIN_TOKEN']},json=data if method=='POST' else None,timeout=120)
     r.raise_for_status();return r.json()
 def export(stage,path):
@@ -72,7 +72,7 @@ def restore(path,instance,confirm):
         return post('/admin/restore-finish',{})
 
 def main():
-    p=argparse.ArgumentParser();p.add_argument('command',choices=['state','health','start','preflight','tick','qualification','export','seed-history','probe-azure','restore','archive-observation']);p.add_argument('--stage',choices=['shadow','pilot','full'],default='full');p.add_argument('--confirm');p.add_argument('--output');p.add_argument('--input');p.add_argument('--instance');a=p.parse_args()
+    p=argparse.ArgumentParser();p.add_argument('command',choices=['state','health','storage-diagnostic','start','preflight','tick','qualification','export','seed-history','probe-azure','restore','archive-observation']);p.add_argument('--stage',choices=['shadow','pilot','full'],default='full');p.add_argument('--confirm');p.add_argument('--output');p.add_argument('--input');p.add_argument('--instance');a=p.parse_args()
     if a.command in ['start','archive-observation'] and not a.confirm:raise RuntimeError('Explicit --confirm experiment-id is required')
     if a.command=='restore':
         if not a.input or not a.confirm:raise RuntimeError('--input backup directory and --confirm original ID are required')
