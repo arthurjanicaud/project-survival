@@ -13,7 +13,7 @@ export function validateForecast(f:Forecast,sourceIds:string[]){
   if(f.probability!==null&&!f.evidence_ids.length)throw Error('PROBABILITY_REQUIRES_EVIDENCE');
   return f;
 }
-export type ScoredForecast={packet?:string;event:string;market:string;at:string;resolved_at:string;probability:number;baseline:number;outcome:0|1;method:string;category:string};
+export type ScoredForecast={packet?:string;event:string;market:string;at:string;resolved_at:string;probability:number;raw_probability?:number;baseline:number;outcome:0|1;method:string;category:string};
 export function score(rows:ScoredForecast[]){
   const unique=[...new Map([...rows].sort((a,b)=>a.at.localeCompare(b.at)).map(r=>[r.market+':'+r.method,r])).values()];
   if(!unique.length)return {n:0,events:0,brier:null,baseline_brier:null,calibration_error:null,improvement:null,bins:[]};

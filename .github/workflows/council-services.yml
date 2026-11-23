@@ -16,6 +16,8 @@ jobs:
       COUNCIL_API_URL: ${{ vars.COUNCIL_API_URL }}
       COUNCIL_ADMIN_TOKEN: ${{ secrets.COUNCIL_ADMIN_TOKEN }}
       COUNCIL_NTFY_TOPIC: ${{ secrets.COUNCIL_NTFY_TOPIC }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+      CLOUDFLARE_ANALYTICS_TOKEN: ${{ secrets.CLOUDFLARE_ANALYTICS_TOKEN }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -33,6 +35,9 @@ jobs:
       - name: Relay phone notifications
         if: steps.watchdog.outputs.storage_blocked != 'true'
         run: python operations/council_collect.py notifications
+      - name: Measure account-wide storage budget
+        if: steps.watchdog.outputs.storage_blocked != 'true'
+        run: python operations/cloudflare_usage.py
       - name: Collect shared public research
         if: steps.watchdog.outputs.storage_blocked != 'true' && (github.event_name == 'workflow_dispatch' || github.event.schedule == '*/5 * * * *')
         # Collector itself checks the last feed timestamp; no LLM or trading job.

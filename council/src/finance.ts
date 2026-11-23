@@ -61,9 +61,9 @@ export function tally(expected:MemberId[],votes:Vote[],p:Proposal,reviewed=false
   const missing=expected.filter(id=>!unique.has(id)),yes=votes.filter(v=>v.vote==='FOR').length,no=votes.filter(v=>v.vote==='AGAINST').length,abstain=votes.length-yes-no;
   const result=(decision:Tally['decision'],reason:string):Tally=>({decision,for:yes,against:no,abstain,missing,reason});
   if(missing.includes('CHAIR')||missing.length>=2)return result('CANCEL','Président absent ou au moins deux membres indisponibles.');
-  if(yes+no<4)return result(!reviewed&&abstain?'REVIEW_ABSTENTION':'POSTPONE','Quatre votes exprimés sont nécessaires.');
   if(yes>=3)return result('APPROVE','Au moins trois voix approuvent la proposition exacte.');
   if(no>=3)return result('REJECT','Au moins trois voix refusent la proposition exacte.');
+  if(yes+no<4)return result(!reviewed&&abstain?'REVIEW_ABSTENTION':'POSTPONE','Aucune majorité de trois voix ; données à compléter avant un nouveau dossier.');
   if(yes===no)return result(abstain&&!reviewed?'REVIEW_ABSTENTION':'TIE','Égalité après quatre votes exprimés.');
   return result('POSTPONE','Majorité insuffisante.');
 }
