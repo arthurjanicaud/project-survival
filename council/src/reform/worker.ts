@@ -12,6 +12,7 @@ import {ReformRepository} from './store';
 import {ReformEngine} from './engine';
 import {recordJobIncident,deliverNotificationJob} from './incidents';
 import {freshDossier} from './dossier';
+import {publicResearchUrl} from '../public-research';
 const json=(x:unknown,status=200)=>Response.json(x,{status,headers:{'Cache-Control':'no-store'}});
 export class ReformCouncil extends DurableObject<Env>{
   repo!:ReformRepository;engine!:ReformEngine;legacy!:Engine;processing=false;private storageBlockedUntil=0;private lastApiMeasure=0;
@@ -102,7 +103,7 @@ export class ReformCouncil extends DurableObject<Env>{
       if(path==='/admin/research'&&r.method==='POST'){
         if(this.engine.run().status==='READY'&&Date.now()>Date.parse(this.repo.get<string>('r4:preflight_until')||'1970-01-01'))return json({ignored:'NOT_STARTED'});
         const b:any=await r.json(),url=new URL(b.url),age=Date.now()-Date.parse(b.fetched_at);
-        if(!Number.isFinite(age)||age< -5000||age>3600000||url.protocol!=='https:'||url.username||url.password||!['site.api.espn.com','api.opendota.com'].includes(url.hostname)||JSON.stringify(b.data).length>4000000)throw Error('INVALID_RESEARCH_FEED');
+        if(!Number.isFinite(age)||age< -5000||age>3600000||!publicResearchUrl(url)||JSON.stringify(b.data).length>4000000)throw Error('INVALID_RESEARCH_FEED');
         if(url.hostname==='site.api.espn.com'&&!/^\/apis\/site\/v2\/sports\/(basketball|soccer|tennis)\/[a-z0-9.]+\/scoreboard$/.test(url.pathname))throw Error('INVALID_RESEARCH_PATH');
         if(url.hostname==='api.opendota.com'&&!/^\/api\/teams(?:\/\d+\/matches)?$/.test(url.pathname))throw Error('INVALID_RESEARCH_PATH');
         this.repo.putCache('research:'+url.href,{fetched_at:b.fetched_at,data:b.data},Math.max(1,Math.floor((3600000-age)/1000)));
@@ -142,7 +143,7 @@ export class ReformCouncil extends DurableObject<Env>{
       if(!permit.allowed){this.repo.retry(job,permit.mode==='PACED'?'READ_BUDGET_PACING':'READ_BUDGET_RESERVED',permit.seconds);this.repo.run("UPDATE jobs SET attempt=max(0,attempt-1) WHERE id=? AND status='PENDING'",job.id);return;}
       if(job.kind==='R4_PREFLIGHT'){
         const category=job.payload.category,deadline=new Date(Date.now()+6*86400000).toISOString(),markets=await this.engine.markets.catalog(category,deadline);let usable=0;const errors:any[]=[],checks:any[]=[];
-        const candidates=markets.flatMap(raw=>{try{const m=normalize(raw,category);return m.active&&Date.parse(m.event_end_at)>Date.now()?[m]:[];}catch(e){return [];}}).sort((a,b)=>coveragePreference(b)-coveragePreference(a));
+        const candidates=markets.flatMap(raw=>{try{const m=normalize(raw,category);return m.active&&Date.parse(m.event_end_at)>Date.now()&&Date.parse(m.event_end_at)<=Date.parse(deadline)?[m]:[];}catch(e){return [];}}).sort((a,b)=>coveragePreference(b)-coveragePreference(a));
         for(const candidate of candidates.slice(0,6))try{this.repo.putMarket(candidate);const m=await this.engine.markets.inspect(candidate.id),result=await this.engine.collectEvidence(m),q=freshDossier(m,result.sources,result.metar,this.engine.run().policy);checks.push({id:m.id,question:m.question,books:Object.keys(m.books),pipeline_ready:q.ready,missing:q.essential_missing,observations:result.metar?{reports:result.metar.rows?.length||0,latest:result.metar.latest||null,error:result.metar.error||null}:null});if(q.ready){usable++;break;}else errors.push({id:candidate.id,missing:q.essential_missing,sources:result.sources.filter(s=>s.status!=='VERIFIED').map(s=>({provider:s.provider,error:s.text})),observations:result.metar?.error||null});}catch(e){errors.push({id:candidate.id,error:String(e)});}
         this.repo.set('r4:preflight:'+category,{at:now(),discovered:markets.length,normalized:candidates.length,usable,pipeline_ready:usable>0,checks,errors,limitation:'Provider connectivity is not predictive qualification.'});
       }else if(job.kind==='NOTIFY'||job.kind==='NOTIFY_RELAY'){

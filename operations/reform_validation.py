@@ -15,7 +15,7 @@ def validate(stage='pilot',timeout_seconds=420):
         baseline=get('/admin/integrity')
         if baseline['counts']['ledger'] or baseline['counts']['positions']:raise RuntimeError('Validation cannot touch a funded object')
         next_collect=0
-        for attempt in range(2):
+        for attempt in range(5):
             started=datetime.now(timezone.utc)
             r=client.post(cfg['COUNCIL_API_URL']+'/admin/preflight',params=params,json={});r.raise_for_status()
             while time.monotonic()<deadline:

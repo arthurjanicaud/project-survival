@@ -15,11 +15,19 @@ from dotenv import dotenv_values
 ROOT=Path(__file__).resolve().parents[1]
 def configuration():
     return {**dotenv_values(ROOT/'.env'),**os.environ}
+
+def due_dota_urls(urls,demands,recent):
+    demanded={d['url'] for d in demands}
+    return [u for u in urls if not recent or urlparse_host(u)!='api.opendota.com' or u in demanded]
+
+def urlparse_host(url):
+    from urllib.parse import urlparse
+    return urlparse(url).hostname
 def compact_espn(d):
     def competition(c):
         return {k:c[k] for k in ['id','date','status','competitors','notes','venue','format','type','situation'] if k in c}
     def competitor(c):
-        return {k:c[k] for k in ['id','type','homeAway','team','athlete','records','curatedRank','statistics','score'] if k in c}
+        return {k:c[k] for k in ['id','type','homeAway','team','athlete','roster','records','curatedRank','statistics','score','linescores','winner'] if k in c}
     events=[]
     for e in d.get('events',[]):
         cs=e.get('competitions',[])+[c for g in e.get('groupings',[]) for c in g.get('competitions',[])]
@@ -28,7 +36,10 @@ def compact_espn(d):
             for t in x['competitors']:
                 for key in ['team','athlete']:
                     if key in t:t[key]={k:v for k,v in t[key].items() if k in ['id','displayName','shortDisplayName','fullName','abbreviation']}
-            names=[t.get('team',t.get('athlete',{})).get('displayName','') for t in x['competitors']]
+                if 'roster' in t:
+                    roster=t['roster'];t['roster']={k:roster[k] for k in ['displayName','shortDisplayName'] if k in roster}
+                    t['roster']['athletes']=[{k:a[k] for k in ['id','displayName','fullName','shortName'] if k in a} for a in roster.get('athletes',[])]
+            names=[t.get('team',t.get('athlete',t.get('roster',{}))).get('displayName','') for t in x['competitors']]
             events.append({'id':e.get('id'),'name':' vs '.join(names) or e.get('name'),'date':c.get('date',e.get('date')),'status':c.get('status',e.get('status')),'competitions':[x],'links':e.get('links',[]),'season':e.get('season'),'tournament':e.get('shortName')})
     return {'events':events,'collector_method':'ESPN public scoreboard, compacted without invented values'}
 def research(force=False):
@@ -60,21 +71,26 @@ def research(force=False):
     dota=0
     for demand in sorted(demands,key=lambda d:d['at']):
         url=demand['url'];host=urlparse(url).hostname
-        if host not in ['site.api.espn.com','api.opendota.com']:continue
+        if host not in ['site.api.espn.com','site.web.api.espn.com','sports.core.api.espn.com','api.opendota.com']:continue
         if host=='api.opendota.com' and '/matches' in url:
             if dota>=6:continue
             dota+=1
         urls.append(url)
     dota_times=[(r.get('research_collector') or {}).get('opendota_at') for r in runs]
     recent_dota=any(v and (datetime.now(timezone.utc)-datetime.fromisoformat(v.replace('Z','+00:00'))).total_seconds()<600 for v in dota_times)
-    if recent_dota:urls=[u for u in urls if urlparse(u).hostname!='api.opendota.com']
+    urls=due_dota_urls(urls,demands,recent_dota)
     urls=list(dict.fromkeys(urls))
+    if not urls:
+        print(json.dumps({'research':'shared_sources_current_no_fetch_needed'}));return
     results=[]
     with httpx.Client(timeout=40,follow_redirects=False) as client:
         def collect(url):
             r=client.get(url,headers={'User-Agent':'ProjectSurvival/3.0 public-research'});r.raise_for_status()
             data=r.json();fetched=datetime.now(timezone.utc).isoformat()
-            if 'espn.com' in url:data=compact_espn(data)
+            host=urlparse(url).hostname
+            if host=='site.api.espn.com':data=compact_espn(data)
+            elif host=='site.web.api.espn.com':data={'items':[{k:t[k] for k in ['id','displayName','sport','type','league'] if k in t} for t in data.get('items',[])]}
+            elif host=='sports.core.api.espn.com' and '/athletes/' in urlparse(url).path and '/statistics' not in urlparse(url).path:data={k:data[k] for k in ['id','displayName','hand','active','statistics'] if k in data}
             elif isinstance(data,list):
                 fields=['match_id','radiant_win','radiant','opposing_team_id','opposing_team_name','start_time','duration','leagueid'] if '/matches' in url else ['team_id','name','rating','wins','losses','last_match_time']
                 data=[{k:t.get(k) for k in fields} for t in (data[:10] if '/matches' in url else data)]

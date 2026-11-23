@@ -9,6 +9,7 @@ import {Markets} from './markets';
 import {reformTarget} from './reform/routing';
 export {ReformCouncil} from './reform/worker';
 import {nextAlarm} from './scheduling';
+import {publicResearchUrl} from './public-research';
 
 const json=(v:unknown,status=200)=>Response.json(v,{status,headers:{'Cache-Control':'no-store'}});
 async function authorized(r:Request,env:Env){
@@ -91,7 +92,7 @@ export class Council extends DurableObject<Env>{
       }
       if(path==='/admin/research'&&r.method==='POST'){
         const b:any=await r.json(),url=new URL(b.url),age=Date.now()-Date.parse(b.fetched_at);
-        if(!['site.api.espn.com','api.opendota.com'].includes(url.hostname)||url.protocol!=='https:'||url.username||url.password||age< -5000||age>3600000||JSON.stringify(b.data).length>4000000)throw Error('INVALID_RESEARCH_FEED');
+        if(!publicResearchUrl(url)||!Number.isFinite(age)||age< -5000||age>3600000||JSON.stringify(b.data).length>4000000)throw Error('INVALID_RESEARCH_FEED');
         if(url.hostname==='site.api.espn.com'&&!/^\/apis\/site\/v2\/sports\/(basketball|soccer|tennis)\/[a-z0-9.]+\/scoreboard$/.test(url.pathname))throw Error('INVALID_RESEARCH_PATH');
         if(url.hostname==='api.opendota.com'&&!/^\/api\/teams(?:\/\d+\/matches)?$/.test(url.pathname))throw Error('INVALID_RESEARCH_PATH');
         this.repo.putCache('research:'+url.href,{fetched_at:b.fetched_at,data:b.data},Math.max(1,Math.floor((3600000-age)/1000)));

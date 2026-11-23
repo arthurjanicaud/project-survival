@@ -44,7 +44,11 @@ Référence : https://developers.cloudflare.com/durable-objects/observability/me
 ## Limites à vérifier avant un prochain lancement
 
 - Les connecteurs réels et leur disponibilité doivent passer les précontrôles ; les tests synthétiques ne peuvent pas remplacer leurs réponses.
+- Quand le tableau ESPN ne couvre pas un match de tennis, un complément gratuit retrouve les deux joueurs par identité exacte, puis leurs statistiques de saison ESPN. Il est limité à l'avant-match, ne confirme pas le calendrier par un second fournisseur et n'est pas un historique complet des Challengers. Les zéros de statistiques ne signifient pas que le joueur n'a jamais perdu. Aucune valeur absente n'est inventée. L'absence d'identité unique ou de statistiques pour l'un des joueurs reste bloquante.
+- Les sources ESPN partagées de plus de dix minutes déclenchent une demande de renouvellement. Un classement d'équipe OpenDota récemment collecté ne doit pas supprimer une demande explicite pour son historique de matchs. Une file vide signifie « rien à collecter », pas « fournisseur en panne ».
 - Les jeux esport sans connecteur restent indisponibles. Aucun quota d'investissement n'est ajouté pour masquer le problème.
 - Le gain prédictif, la qualité des débats et l'utilisation du capital doivent être mesurés prospectivement. Ils ne deviennent pas garantis grâce à ces corrections.
 - Il faut choisir un nouvel identifiant de fonds avant un prochain START ; l'identifiant phase 4 archivé ne doit pas être réutilisé.
 - Les sauvegardes financières se contrôlent avec `/admin/integrity`, qui calcule une empreinte du journal, des positions, des fills et du périmètre de l'expérience.
+
+Accès publics ESPN vérifiés pour le complément tennis : `https://site.web.api.espn.com/apis/common/v3/search?query=Alafia%20Ayeni&limit=5&type=player` puis les profils du domaine `sports.core.api.espn.com`. Les références de statistiques proviennent du profil officiel ; elles ne sont pas devinées. Ces routes sont limitées à la recherche de joueurs et aux profils/statistiques tennis par la liste d'autorisation du collecteur.
