@@ -144,7 +144,8 @@ export class Markets {
   }
   async get(url:string,cacheSeconds=0):Promise<any>{
     const u=new URL(url);if(!allowed.has(u.hostname)||u.protocol!=='https:'||u.username||u.password)throw Error('PROVIDER_NOT_ALLOWED');
-    const research=this.repo.cache<any>('research:'+url);if(research&&Number.isFinite(Date.parse(research.fetched_at))&&Date.now()-Date.parse(research.fetched_at)>=-5000&&Date.now()-Date.parse(research.fetched_at)<600000)return research.data;
+    const research=this.repo.cache<any>('research:'+url),age=research?Date.now()-Date.parse(research.fetched_at):NaN;
+    if(research&&Number.isFinite(age)&&age>=-5000&&age<900000){if(age>=600000)this.repo.requestSource(url);return research.data;}
     if(['site.api.espn.com','site.web.api.espn.com','sports.core.api.espn.com','api.opendota.com'].includes(u.hostname)){this.repo.requestSource(url);throw Error('SHARED_RESEARCH_FEED_MISSING_OR_STALE');}
     if(cacheSeconds){const cached=this.repo.cache(url);if(cached)return cached;}
     const cooldown=this.repo.get<any>('provider_cooldown:'+u.hostname);if(cooldown?.until&&Date.parse(cooldown.until)>Date.now())throw Error('PROVIDER_RATE_LIMITED');

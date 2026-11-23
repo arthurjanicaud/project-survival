@@ -17,8 +17,8 @@ test('free player context is explicitly scoped when a Challenger fixture is abse
 test('player lookup requires an exact unique identity; no invented matching or history for an unknown name',async()=>{
  const s=harness();s.seed('Alafia Ayeni','3341');const sources=await s.api.evidence(s.m);assert.equal(sources.filter(r=>r.status==='VERIFIED'&&r.provider==='ESPN').length,1);assert.ok(s.r.sourceDemands().some(d=>d.url.includes('Alex%20Bolt')));
 });
-test('shared feeds older than ten minutes request a refresh instead of masquerading as current facts',async()=>{
- const s=harness(),url='https://site.api.espn.com/apis/site/v2/sports/tennis/atp/scoreboard?dates=20261123';s.cache(url,{events:[]},new Date(Date.now()-1200000).toISOString());await assert.rejects(s.api.get(url),/MISSING_OR_STALE/);assert.ok(s.r.sourceDemands().some(d=>d.url===url));
+test('shared feeds request proactive refresh before expiry and reject expired data',async()=>{
+ const s=harness(),url='https://site.api.espn.com/apis/site/v2/sports/tennis/atp/scoreboard?dates=20261123';s.cache(url,{events:[]},new Date(Date.now()-660000).toISOString());assert.deepEqual(await s.api.get(url),{events:[]});assert.ok(s.r.sourceDemands().some(d=>d.url===url));s.cache(url,{events:[]},new Date(Date.now()-1200000).toISOString());await assert.rejects(s.api.get(url),/MISSING_OR_STALE/);
 });
 test('new public feed routes admit only player search and fixed tennis profiles/statistics, without credentials',()=>{
  const yes=['https://site.web.api.espn.com/apis/common/v3/search?query=Alex%20Bolt&limit=5&type=player','https://sports.core.api.espn.com/v2/sports/tennis/athletes/2255?lang=en&region=us','https://sports.core.api.espn.com/v2/sports/tennis/leagues/atp/seasons/2026/types/2/athletes/2255/statistics?lang=en&region=us'];for(const u of yes)assert.equal(publicResearchUrl(new URL(u)),true);
