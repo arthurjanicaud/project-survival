@@ -15,20 +15,21 @@ def validate(stage='pilot',timeout_seconds=420):
         baseline=get('/admin/integrity')
         if baseline['counts']['ledger'] or baseline['counts']['positions']:raise RuntimeError('Validation cannot touch a funded object')
         next_collect=0
-        for attempt in range(2):
+        for attempt in range(5):
             started=datetime.now(timezone.utc)
             r=client.post(cfg['COUNCIL_API_URL']+'/admin/preflight',params=params,json={});r.raise_for_status()
             while time.monotonic()<deadline:
                 time.sleep(10)
-                state=get('/api/state');checks=state.get('preflight',{})
+                checks=get('/admin/readiness')['domains']
                 # Shared source demands are public data only, not reasoning jobs.
                 from operations.council_collect import research
                 if time.monotonic()>=next_collect:
                     research();next_collect=time.monotonic()+60
-                if all(c and datetime.fromisoformat(c['at'].replace('Z','+00:00'))>=started for c in checks.values()) and len(checks)==5:break
+                if len(checks)==5 and all(c.get('checked_at') and datetime.fromisoformat(c['checked_at'].replace('Z','+00:00'))>=started for c in checks):break
             ready=get('/admin/readiness')
             if all(d['ready'] for d in ready['domains']):break
             if time.monotonic()>=deadline:break
+            research()  # Resolve demands created by the last source job before retrying.
         after=get('/admin/integrity')
         if after['financial_sha256']!=baseline['financial_sha256']:raise RuntimeError('Validation changed fund integrity')
         return {'at':datetime.now(timezone.utc).isoformat(),'mode':'read-only-provider-validation','no_start':True,'azure_calls':0,'financial_integrity_unchanged':True,'readiness':ready,'preflight':get('/api/state').get('preflight',{})}

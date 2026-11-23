@@ -3,7 +3,7 @@ import {Repository} from './repository';
 import {D} from './finance';
 
 const GAMMA='https://gamma-api.polymarket.com',CLOB='https://clob.polymarket.com',DATA='https://data-api.polymarket.com';
-const allowed=new Set(['gamma-api.polymarket.com','clob.polymarket.com','data-api.polymarket.com','api.frankfurter.dev','api.weather.gov','api.open-meteo.com','ensemble-api.open-meteo.com','site.api.espn.com','api.opendota.com','aviationweather.gov']);
+const allowed=new Set(['gamma-api.polymarket.com','clob.polymarket.com','data-api.polymarket.com','api.frankfurter.dev','api.weather.gov','api.open-meteo.com','ensemble-api.open-meteo.com','site.api.espn.com','site.web.api.espn.com','sports.core.api.espn.com','api.opendota.com','aviationweather.gov']);
 const arr=(x:any):any[]=>Array.isArray(x)?x:typeof x==='string'?JSON.parse(x):[];
 const numeric=(v:any)=>v===undefined||v===null?null:D(String(v)).toFixed();
 const nameKey=(v:any)=>String(v||'').normalize('NFKD').replace(/\p{M}/gu,'').toLowerCase().replace(/[^\p{L}\p{N}]+/gu,' ').trim();
@@ -59,7 +59,7 @@ export function ensembleSummary(data:any,day:string){
 }
 export function sportsFacts(e:any){
   const record=(r:any)=>({type:r.type||r.name,summary_unparsed:r.summary,statistics:r.stats?.filter((s:any)=>/wins|losses|ties|draws|points|played|percent/i.test(s.name||'')).map((s:any)=>({name:s.name,value:s.value,displayValue:s.displayValue}))});
-  return {name:e.name,date:e.date,status:{...e.status?.type,period:e.status?.period,display_clock:e.status?.displayClock},competitors:e.competitions?.flatMap((c:any)=>c.competitors?.map((t:any)=>({name:t.team?.displayName||t.athlete?.displayName,score:t.score,records:t.records?.map(record),statistics:t.statistics?.filter((s:any)=>/point|goal|rebound|turnover|assist|fieldGoal|threePoint|rank|win|loss|ace|serve|save|possession/i.test(s.name||'')).slice(0,12),homeAway:t.homeAway,rank:t.curatedRank,venue:c.venue?.fullName}))),links:e.links?.map((l:any)=>l.href),limitation:'Only supplied scoreboard statistics; scheduled zero values are not a live score. No unverified injury or roster claim.'};
+  return {name:e.name,date:e.date,status:{...e.status?.type,period:e.status?.period,display_clock:e.status?.displayClock},competitors:e.competitions?.flatMap((c:any)=>c.competitors?.map((t:any)=>({name:t.team?.displayName||t.athlete?.displayName||t.roster?.displayName,players:t.roster?.athletes?.map((a:any)=>a.displayName||a.fullName),sets:t.linescores,winner:t.winner,score:t.score,records:t.records?.map(record),statistics:t.statistics?.filter((s:any)=>/point|goal|rebound|turnover|assist|fieldGoal|threePoint|rank|win|loss|ace|serve|save|possession/i.test(s.name||'')).slice(0,12),homeAway:t.homeAway,rank:t.curatedRank,venue:c.venue?.fullName}))),links:e.links?.map((l:any)=>l.href),limitation:'Only supplied scoreboard statistics; scheduled zero values are not a live score. No unverified injury or roster claim.'};
 }
 export function localMidnight(day:string,tz:string){
   let t=Date.parse(day+'T00:00:00Z');
@@ -144,8 +144,9 @@ export class Markets {
   }
   async get(url:string,cacheSeconds=0):Promise<any>{
     const u=new URL(url);if(!allowed.has(u.hostname)||u.protocol!=='https:'||u.username||u.password)throw Error('PROVIDER_NOT_ALLOWED');
-    const research=this.repo.cache<any>('research:'+url);if(research)return research.data;
-    if(['site.api.espn.com','api.opendota.com'].includes(u.hostname)){this.repo.requestSource(url);throw Error('SHARED_RESEARCH_FEED_MISSING_OR_STALE');}
+    const research=this.repo.cache<any>('research:'+url),age=research?Date.now()-Date.parse(research.fetched_at):NaN;
+    if(research&&Number.isFinite(age)&&age>=-5000&&age<900000){if(age>=600000)this.repo.requestSource(url);return research.data;}
+    if(['site.api.espn.com','site.web.api.espn.com','sports.core.api.espn.com','api.opendota.com'].includes(u.hostname)){this.repo.requestSource(url);throw Error('SHARED_RESEARCH_FEED_MISSING_OR_STALE');}
     if(cacheSeconds){const cached=this.repo.cache(url);if(cached)return cached;}
     const cooldown=this.repo.get<any>('provider_cooldown:'+u.hostname);if(cooldown?.until&&Date.parse(cooldown.until)>Date.now())throw Error('PROVIDER_RATE_LIMITED');
     for(let a=0;a<2;a++){
@@ -240,8 +241,25 @@ export class Markets {
       const prefix=m.url.split('/event/')[1]?.split('-')[0],mapping:Record<string,string>={uwcl:'soccer/uefa.wchampions',bra2:'soccer/bra.2',bra:'soccer/bra.1',epl:'soccer/eng.1',lal:'soccer/esp.1',bund:'soccer/ger.1',bun:'soccer/ger.1',lig1:'soccer/fra.1',ita:'soccer/ita.1',mls:'soccer/usa.1',ucl:'soccer/uefa.champions',nba:'basketball/nba',wnba:'basketball/wnba',atp:'tennis/atp',wta:'tennis/wta'};
       const hint=mapping[prefix],leagues=hint?[hint]:m.category==='football'?['soccer/eng.1','soccer/esp.1','soccer/ger.1','soccer/fra.1','soccer/ita.1','soccer/bra.1','soccer/usa.1','soccer/uefa.champions']:m.category==='basketball'?['basketball/nba','basketball/wnba']:['tennis/atp','tennis/wta'];
       for(const league of leagues)for(const day of days){
-        const s=await this.source(`https://site.api.espn.com/apis/site/v2/sports/${league}/scoreboard?dates=${day}`,`Rencontres et informations publiques ${league}`,'ESPN',d=>(d.events||[]).filter((e:any)=>{const text=m.question+' '+(m.event_title||'')+' '+(m.fixture_context||'')+' '+m.description.slice(0,1500)+(hint?' '+m.url:''),competitors=e.competitions?.flatMap((c:any)=>c.competitors||[])||[];return competitors.filter((t:any)=>[t.team?.displayName,t.team?.shortDisplayName,hint?t.team?.abbreviation:null,t.athlete?.displayName,t.athlete?.fullName].some(n=>nameMatches(n,text))).length>=2&&Math.abs(Date.parse(e.date)-date)<18*3600000;}).map((e:any)=>sportsFacts(e)).slice(0,6));
+        const s=await this.source(`https://site.api.espn.com/apis/site/v2/sports/${league}/scoreboard?dates=${day}`,`Rencontres et informations publiques ${league}`,'ESPN',d=>(d.events||[]).filter((e:any)=>{const text=m.question+' '+(m.event_title||'')+' '+(m.fixture_context||'')+' '+m.description.slice(0,1500)+(hint?' '+m.url:''),competitors=e.competitions?.flatMap((c:any)=>c.competitors||[])||[];return competitors.filter((t:any)=>[t.team?.displayName,t.team?.shortDisplayName,hint?t.team?.abbreviation:null,t.athlete?.displayName,t.athlete?.fullName,t.roster?.displayName].some(n=>nameMatches(n,text))).length>=2&&Math.abs(Date.parse(e.date)-date)<18*3600000;}).map((e:any)=>sportsFacts(e)).slice(0,6));
         sources.push(s);
+      }
+    }
+    if(m.category==='tennis'&&Date.parse(m.start_at||'')>Date.now()&&!sources.some(s=>s.provider==='ESPN'&&s.status==='VERIFIED')){
+      // Challenger fixtures may be absent from the Tour scoreboard. Preserve that
+      // limitation and retrieve exact player identities and season stats instead.
+      const names=Object.values(m.outcome_labels||{});
+      if(names.length===2&&names.every(n=>nameKey(n).includes(' ')&&!/^(yes|no)$/i.test(n)))for(const name of names){
+        const search=`https://site.web.api.espn.com/apis/common/v3/search?query=${encodeURIComponent(name)}&limit=5&type=player`;
+        try{
+          const result=await this.get(search,86400),matches=(result.items||[]).filter((p:any)=>p.sport==='tennis'&&p.type==='player'&&nameKey(p.displayName)===nameKey(name)&&/^\d+$/.test(String(p.id)));
+          if(matches.length!==1)continue;const id=matches[0].id,profileUrl=`https://sports.core.api.espn.com/v2/sports/tennis/athletes/${id}?lang=en&region=us`,profile=await this.get(profileUrl,86400);
+          if(String(profile.id)!==String(id)||nameKey(profile.displayName)!==nameKey(name))continue;
+          const ref=profile.statistics?.$ref;if(!ref)continue;const statsUrl=new URL(ref);statsUrl.protocol='https:';
+          if(statsUrl.hostname!=='sports.core.api.espn.com'||!new RegExp('^/v2/sports/tennis/leagues/(atp|wta)/seasons/\\d{4}/types/\\d+/athletes/'+id+'/statistics(?:/\\d+)?$').test(statsUrl.pathname))continue;
+          const s=await this.source(statsUrl.href,`Profil et statistiques de saison ESPN : ${name}`,'ESPN',stats=>{const values=stats.splits?.categories?.flatMap((c:any)=>c.stats||[]).filter((v:any)=>typeof v.value==='number'&&Number.isFinite(v.value)).map((v:any)=>({name:v.name,value:v.value,displayValue:v.displayValue}));if(!values?.length)return null;return {player:{id,displayName:profile.displayName,hand:profile.hand?.displayValue,active:profile.active},season:statsUrl.pathname.match(/seasons\/(\d{4})/)?.[1],statistics_scope:'ESPN season statistics; lower-tour matches may be missing. Zeros do not establish an unbeaten record.',statistics:values,last_updated_at:null,fixture_verified_by_scoreboard:false,limitation:'Pre-match player context only, not live scores, confirmed lineup, complete Challenger results or a calibrated prediction.'};});
+          sources.push(s);
+        }catch{/* Source demand is persisted; do not invent player history or bypass an unavailable feed. */}
       }
     }
     const seen=new Set();return sources.filter(s=>{const key=s.provider+':'+s.text;if(seen.has(key))return false;seen.add(key);return true;});

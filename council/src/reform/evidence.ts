@@ -53,6 +53,11 @@ export function quality(m:Market,sources:Source[],metar:any,at=Date.now(),policy
     warnings.push('La dispersion des modèles météo ne constitue pas une calibration stationnelle.');
   }else if(inProgress&&!independent.some(s=>/"state"\s*:\s*"(in|post)"/.test(s.text)&&at-Date.parse(s.fetched_at)<300000))missing.push('État sportif réellement en direct : score, temps et événement identifié');
   if(m.category==='esport'&&!/dota/i.test(m.question))missing.push('Connecteur spécifique à ce jeu esport non disponible');
+  const playerProfiles=independent.filter(s=>s.text.includes('fixture_verified_by_scoreboard'));
+  if(m.category==='tennis'&&playerProfiles.length){
+    if(playerProfiles.length<2)missing.push('Identité et statistiques vérifiées nécessaires pour les deux joueurs');
+    warnings.push('Profils de saison ESPN seulement : couverture Challenger partielle, ni score en direct ni composition confirmée. Des statistiques nulles ne prouvent pas une absence de défaites.');
+  }
   return {ready:missing.length===0,essential_missing:missing,warnings,families:[...new Set(independent.map(s=>family(s.provider)))],in_progress:inProgress};
 }
 export function anomaly(probability:number,price:number,interval:{lower:number;upper:number}){
