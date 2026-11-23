@@ -11,6 +11,7 @@ import {recoveryStatus,beginRecovery,restoreChunk,finishRecovery,BACKUP_TABLES} 
 import {ReformRepository} from './store';
 import {ReformEngine} from './engine';
 import {recordJobIncident,deliverNotificationJob} from './incidents';
+import {freshDossier} from './dossier';
 const json=(x:unknown,status=200)=>Response.json(x,{status,headers:{'Cache-Control':'no-store'}});
 export class ReformCouncil extends DurableObject<Env>{
   repo!:ReformRepository;engine!:ReformEngine;legacy!:Engine;processing=false;private storageBlockedUntil=0;private lastApiMeasure=0;
@@ -36,6 +37,10 @@ export class ReformCouncil extends DurableObject<Env>{
         if(path==='/admin/recovery-state'&&r.method==='GET')return json({recovery:recoveryStatus(this.repo),state:this.engine.summary()});
         if(path==='/admin/export-page'&&r.method==='GET')return json(this.repo.page(u.searchParams.get('table')||'',Number(u.searchParams.get('after'))||0,Number(u.searchParams.get('limit'))||50));
         throw Error('RECOVERY_IS_READ_ONLY');
+      }
+      if(path==='/admin/learning-export'){
+        const run=this.engine.run();if(run.status!=='FINISHED'||!run.end_at||Date.parse(run.end_at)>Date.now())throw Error('LEARNING_SOURCE_MUST_BE_FINISHED');
+        return json({source_id:run.id,end_at:run.end_at,policy_hash:run.policy_hash,actors:Object.fromEntries(['WEATHER','FOOTBALL','BASKETBALL','TENNIS','ESPORT','QUANT','RISK','CONTRA','CHAIR'].map(actor=>[actor,this.engine.scored(actor).slice(-500)])),limitation:'Historical labels for learning only; never qualification credit or funds.'});
       }
       await this.engine.prepare(target.id,target.stage);
       const backup=this.repo.get<any>('r4:backup_lock'),locked=backup&&Date.parse(backup.until)>Date.now();
@@ -63,6 +68,22 @@ export class ReformCouncil extends DurableObject<Env>{
       if(path==='/admin/probe-azure'&&r.method==='POST')return json({azure:await this.engine.azure.ask('r4:probe:'+now(),'CHAIR','connectivity_probe',{protocol:'reform-v4',instruction:'Test technique, réponds ok true. Aucun investissement.'},z.object({ok:z.boolean()}).strict()),experiment_started:this.engine.run().started_at!==null});
       if(path==='/admin/query-costs')return json({cycle:this.repo.get('r4:last_storage_cycle'),request:this.repo.get('r4:last_storage_request')});
       if(path==='/admin/qualification')return json(this.engine.qualification());
+      if(path==='/admin/readiness')return json(this.engine.readiness());
+      if(path==='/admin/integrity'){
+        const run=this.engine.run(),ledger=this.repo.rows('SELECT * FROM ledger ORDER BY id'),positions=this.repo.rows('SELECT * FROM positions ORDER BY id'),fills=this.repo.rows('SELECT * FROM fills ORDER BY id');
+        const {hash}=await import('../markets');const scope={id:run.id,started_at:run.started_at,end_at:run.end_at,policy_hash:run.policy_hash};
+        return json({run:scope,financial_sha256:await hash({run:scope,ledger,positions,fills}),counts:{ledger:ledger.length,positions:positions.length,fills:fills.length}});
+      }
+      if(path==='/admin/account-usage'&&r.method==='POST'){
+        const b=z.object({configured:z.literal(true),source:z.literal('Cloudflare GraphQL'),at:z.iso.datetime({offset:true}),day:z.string().regex(/^\d{4}-\d{2}-\d{2}$/),reads:z.number().int().nonnegative(),writes:z.number().int().nonnegative(),namespace_count:z.number().int().nonnegative(),scope:z.literal('whole-account'),delayed_metrics:z.literal(true)}).strict().parse(await r.json());
+        if(b.day!==now().slice(0,10)||Date.now()-Date.parse(b.at)>900000||Date.parse(b.at)>Date.now()+5000)throw Error('ACCOUNT_USAGE_NOT_CURRENT');
+        const old=this.repo.get<any>('r4:account_usage');this.repo.set('r4:account_usage',{...b,reads:Math.max(b.reads,old?.day===b.day?old.reads:0),writes:Math.max(b.writes,old?.day===b.day?old.writes:0)});return json({recorded:true});
+      }
+      if(path==='/admin/billing'&&r.method==='POST'){
+        const b=z.object({confirm:z.string(),amount_eur:z.string().regex(/^\d+(\.\d{1,2})?$/),source:z.enum(['owner_reported','invoice_export']),period_start:z.iso.datetime({offset:true}),period_end:z.iso.datetime({offset:true})}).strict().parse(await r.json()),run=this.engine.run();
+        if(b.confirm!==run.id||Number(b.amount_eur)>10000||!run.started_at||Date.parse(b.period_start)!==Date.parse(run.started_at)||Date.parse(b.period_end)!==Date.parse(run.end_at!))throw Error('BILLING_SCOPE_MISMATCH');
+        this.repo.set('r4:billing',{...b,recorded_at:now(),invoice_verified:false});this.repo.run("DELETE FROM transient_cache WHERE key='r4:summary'");return json({recorded:true,financial_ledger_unchanged:true});
+      }
       if(path==='/admin/archive-observation'&&r.method==='POST'){const body:any=await r.json();const result=this.engine.archiveObservation(body.confirm);await this.arm();return json(result);}
       if(path==='/admin/start'&&r.method==='POST'){
         const body:any=await r.json();let qualification=null;
@@ -91,6 +112,10 @@ export class ReformCouncil extends DurableObject<Env>{
       if(path==='/admin/notification-ack'&&r.method==='POST'){const b:any=await r.json();const row=this.repo.one('SELECT payload FROM notifications WHERE id=?',b.id);if(row)this.repo.run("UPDATE notifications SET status='SENT',payload=? WHERE id=?",JSON.stringify({...JSON.parse(row.payload),sent_at:now()}),b.id);return json({ok:true});}
       if(path==='/admin/tick'&&r.method==='POST'){this.engine.tick();await this.arm();return json({ok:true});}
       if(path==='/admin/preflight'&&r.method==='POST'){
+        if(this.engine.improved()&&this.engine.run().status==='READY'&&!this.repo.get('r4:prior_learning')&&this.engine.run().id!=='survival-004-active'){
+          const peer=this.env.REFORM!.get(this.env.REFORM!.idFromName('survival-004-active')),response=await peer.fetch(new Request('https://internal/admin/learning-export',{headers:{'x-reform-stage':'full'}}));
+          if(!response.ok)throw Error('ARCHIVED_LEARNING_UNAVAILABLE');const history:any=await response.json();if(history.source_id!=='survival-004-active'||Date.parse(history.end_at)>Date.now())throw Error('INVALID_LEARNING_SOURCE');this.repo.set('r4:prior_learning',{...history,imported_at:now()});
+        }
         this.repo.set('r4:preflight_until',new Date(Date.now()+1800000).toISOString());const run=this.engine.run();for(const category of ['weather','football','basketball','tennis','esport'])this.repo.enqueue('r4:preflight:'+now()+':'+category,'R4_PREFLIGHT',{category});await this.arm();return json({queued:true,experiment_started:run.started_at!==null});
       }
       return json({error:'NOT_FOUND'},404);
@@ -118,8 +143,8 @@ export class ReformCouncil extends DurableObject<Env>{
       if(job.kind==='R4_PREFLIGHT'){
         const category=job.payload.category,deadline=new Date(Date.now()+6*86400000).toISOString(),markets=await this.engine.markets.catalog(category,deadline);let usable=0;const errors:any[]=[],checks:any[]=[];
         const candidates=markets.flatMap(raw=>{try{const m=normalize(raw,category);return m.active&&Date.parse(m.event_end_at)>Date.now()?[m]:[];}catch(e){return [];}}).sort((a,b)=>coveragePreference(b)-coveragePreference(a));
-        for(const candidate of candidates.slice(0,6))try{this.repo.putMarket(candidate);const m=await this.engine.markets.inspect(candidate.id),result=await this.engine.collectEvidence(m);checks.push({id:m.id,question:m.question,books:Object.keys(m.books),observations:result.metar?{reports:result.metar.rows?.length||0,latest:result.metar.latest||null,error:result.metar.error||null}:null});if(result.sources.some(s=>s.provider!=='Polymarket'&&s.status==='VERIFIED')){usable++;break;}else errors.push({id:candidate.id,sources:result.sources.filter(s=>s.status!=='VERIFIED').map(s=>({provider:s.provider,error:s.text})),observations:result.metar?.error||null});}catch(e){errors.push({id:candidate.id,error:String(e)});}
-        this.repo.set('r4:preflight:'+category,{at:now(),discovered:markets.length,normalized:candidates.length,usable,checks,errors,limitation:'Provider connectivity is not predictive qualification.'});
+        for(const candidate of candidates.slice(0,6))try{this.repo.putMarket(candidate);const m=await this.engine.markets.inspect(candidate.id),result=await this.engine.collectEvidence(m),q=freshDossier(m,result.sources,result.metar,this.engine.run().policy);checks.push({id:m.id,question:m.question,books:Object.keys(m.books),pipeline_ready:q.ready,missing:q.essential_missing,observations:result.metar?{reports:result.metar.rows?.length||0,latest:result.metar.latest||null,error:result.metar.error||null}:null});if(q.ready){usable++;break;}else errors.push({id:candidate.id,missing:q.essential_missing,sources:result.sources.filter(s=>s.status!=='VERIFIED').map(s=>({provider:s.provider,error:s.text})),observations:result.metar?.error||null});}catch(e){errors.push({id:candidate.id,error:String(e)});}
+        this.repo.set('r4:preflight:'+category,{at:now(),discovered:markets.length,normalized:candidates.length,usable,pipeline_ready:usable>0,checks,errors,limitation:'Provider connectivity is not predictive qualification.'});
       }else if(job.kind==='NOTIFY'||job.kind==='NOTIFY_RELAY'){
         // The scheduled GitHub relay drains the persistent outbox. Dispatching
         // a new workflow for every item causes retry storms when GitHub fails.

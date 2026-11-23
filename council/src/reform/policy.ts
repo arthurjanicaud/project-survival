@@ -1,6 +1,6 @@
 import {z} from 'zod';
 export const PolicySchema=z.object({
-  version:z.enum(['survival-reform-1','survival-active-1']),durationHours:z.number().int().min(24).max(720),
+  version:z.enum(['survival-reform-1','survival-active-1','survival-reform-2','survival-active-2']),durationHours:z.number().int().min(24).max(720),
   maximumSlippageTicks:z.number().int().min(0).max(5).default(2),
   requireQualification:z.boolean().default(true),unvalidatedBetFraction:z.number().positive().max(.05).default(.025),minimumEstimatedEdge:z.number().min(0).max(.2).default(.02),
   shadowMinimumHours:z.number().min(24),pilotCapitalEur:z.string().regex(/^\d+(\.\d+)?$/),fullCapitalEur:z.string().regex(/^\d+(\.\d+)?$/),
@@ -26,4 +26,4 @@ export const POLICY=PolicySchema.parse({version:'survival-reform-1',durationHour
 export type Policy=z.infer<typeof PolicySchema>;
 
 export const ACTIVE_POLICY=PolicySchema.parse({...POLICY,version:'survival-active-1',requireQualification:false,initialReleaseFraction:1,unvalidatedBetFraction:.025});
-export function policyFor(stage:string,active:boolean){return stage==='FULL'&&active?ACTIVE_POLICY:POLICY;}
+export function policyFor(stage:string,active:boolean,improved=false){const policy=stage==='FULL'&&active?ACTIVE_POLICY:POLICY;return improved?{...policy,version:stage==='FULL'&&active?'survival-active-2':'survival-reform-2'}:policy;}

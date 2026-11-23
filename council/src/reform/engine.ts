@@ -13,16 +13,21 @@ import {coverage,healthView} from './telemetry';
 import {readiness,evaluationWindows,pairedAblation,fairMissedOpportunities} from './evaluation';
 import {allowance} from './allocation';
 import {wilson} from './models';
+import {observationCore,scopedSource,freshDossier,livePacket} from './dossier';
+import {learningProfile,learnedForecast} from './learning';
+import {launchReadiness} from './readiness';
 
 export type Run={id:string;stage:'SHADOW'|'PILOT'|'FULL';status:'READY'|'RUNNING'|'CLOSING'|'FINISHED';created_at:string;started_at:string|null;end_at:string|null;evaluation_cutoff:string|null;policy:Policy;policy_hash:string;code_version:string;last_scan:string|null;qualification:any;stopped_at?:string;stop_reason?:string};
 export class ReformEngine {
   markets:Markets;azure:Azure;
   constructor(public repo:ReformRepository,public env:Env,markets?:Markets,azure?:Azure){repo.migrateReform();this.markets=markets||new Markets(repo);this.azure=azure||new Azure(repo,env);}
   run(){return this.repo.get<Run>('reform_run')!;}
+  improved(){return this.run()?.policy.version.endsWith('-2')||false;}
+  learningRows(actor:string){const prior=this.repo.get<any>('r4:prior_learning');return [...(prior?.actors?.[actor]||[]),...this.scored(actor)];}
   async prepare(id:string,stage:Run['stage']){
     if(this.env.ALLOW_FIXTURES==='true')throw Error('REFORM_LIVE_PROTOCOL_REJECTS_FIXTURE_MODE');
-    const old=this.run();if(old){if(old.id!==id||old.stage!==stage)throw Error('REFORM_ID_MISMATCH');await this.adoptReadRepair(old);if(old.status==='READY'&&old.code_version!==this.activeCode()){old.policy=PolicySchema.parse(policyFor(stage,this.env.REFORM_ACTIVE_MODE==='true'));old.policy_hash=await hash(old.policy);old.code_version=this.activeCode();this.repo.set('reform_run',old);const s=this.repo.state()!;s.initial_eur=stage==='SHADOW'?'0':stage==='PILOT'?old.policy.pilotCapitalEur:old.policy.fullCapitalEur;this.repo.save(s);this.repo.run("DELETE FROM transient_cache WHERE key LIKE 'r4:%'");}return old;}
-    const policy=PolicySchema.parse(policyFor(stage,this.env.REFORM_ACTIVE_MODE==='true')),run:Run={id,stage,status:'READY',created_at:now(),started_at:null,end_at:null,evaluation_cutoff:null,policy,policy_hash:await hash(policy),code_version:this.env.CF_VERSION_METADATA?.id||'local-test',last_scan:null,qualification:null};this.repo.set('reform_run',run);
+    const old=this.run();if(old){if(old.id!==id||old.stage!==stage)throw Error('REFORM_ID_MISMATCH');await this.adoptReadRepair(old);if(old.status==='READY'&&old.code_version!==this.activeCode()){old.policy=PolicySchema.parse(policyFor(stage,this.env.REFORM_ACTIVE_MODE==='true',this.env.REFORM_IMPROVEMENTS==='true'));old.policy_hash=await hash(old.policy);old.code_version=this.activeCode();this.repo.set('reform_run',old);const s=this.repo.state()!;s.initial_eur=stage==='SHADOW'?'0':stage==='PILOT'?old.policy.pilotCapitalEur:old.policy.fullCapitalEur;this.repo.save(s);this.repo.run("DELETE FROM transient_cache WHERE key LIKE 'r4:%'");}return old;}
+    const policy=PolicySchema.parse(policyFor(stage,this.env.REFORM_ACTIVE_MODE==='true',this.env.REFORM_IMPROVEMENTS==='true')),run:Run={id,stage,status:'READY',created_at:now(),started_at:null,end_at:null,evaluation_cutoff:null,policy,policy_hash:await hash(policy),code_version:this.env.CF_VERSION_METADATA?.id||'local-test',last_scan:null,qualification:null};this.repo.set('reform_run',run);
     const state:State={id,mode:'live',status:'READY',initial_eur:stage==='SHADOW'?'0':stage==='PILOT'?policy.pilotCapitalEur:policy.fullCapitalEur,created_at:now(),updated_at:now(),started_at:null,end_at:null,betting_deadline:null,fx:null,last_scan:null,last_cycle:null,emergency_day:'',emergency_count:0,last_emergency:null,last_error:null};this.repo.save(state);return run;
   }
   async adoptReadRepair(run:Run){
@@ -45,6 +50,7 @@ export class ReformEngine {
   }
   async start(confirm:string,qualification:any=null){
     const run=this.run();if(confirm!==run.id)throw Error('EXPLICIT_EXPERIMENT_ID_REQUIRED');if(run.status!=='READY')throw Error('START_IS_NEVER_A_RESET');
+    if(this.improved()&&!this.readiness().ready)throw Error('ALL_FIVE_DOMAINS_REQUIRE_FRESH_COMPLETE_PREFLIGHT');
     if(run.policy.requireQualification&&run.stage!=='SHADOW'&&(!qualification?.eligible||qualification.policy_hash!==run.policy_hash||qualification.code_version!==this.activeCode()))throw Error('QUALIFIED_OUT_OF_SAMPLE_SHADOW_REQUIRED');
     run.code_version=this.env.CF_VERSION_METADATA?.id||'local-test';
     const fx=await this.markets.fx();
@@ -87,7 +93,7 @@ export class ReformEngine {
   async process(job:any){
     if(!this.protocolCurrent()&&!['R4_SETTLE','R4_WATCH'].includes(job.kind)){this.repo.event('r4:code:'+this.activeCode(),'PROTOCOL_PAUSED','La version active a changé pendant l’expérience. Les nouveaux avis sont suspendus ; les règlements restent surveillés.');throw Error('FROZEN_CODE_VERSION_CHANGED');}
     if(job.kind==='R4_SCAN')return this.scan(job.payload.category,job.payload.bucket);
-    if(job.kind==='R4_PREPARE')return this.preparePacket(job.payload.id,job.payload.category);
+    if(job.kind==='R4_PREPARE')return this.preparePacket(job.payload.id,job.payload.category,job.payload.force||false);
     if(job.kind==='R4_FORECAST')return this.forecast(job.payload.packet,job.payload.actor);
     if(job.kind==='R4_SLOT')return this.slot(job.payload.slot,job.payload.urgent||false,job.payload.kickoff||false);
     if(job.kind==='R4_MEETING')return this.meeting(job.payload.id);
@@ -120,26 +126,40 @@ export class ReformEngine {
       const station=stationFor(market);if(station){const url=`https://aviationweather.gov/api/data/metar?ids=${station.station}&format=json&hours=48`;
         try{const rows=await this.markets.get(url,300);metar=observations(market,rows);sources.push({id:await hash({url,rows}),url,title:'Observations routine METAR '+station.station,provider:'NOAA AWC',fetched_at:this.repo.cache<string>('observed:'+url)||now(),status:'VERIFIED',text:JSON.stringify(metar)});}catch{metar={error:'OBSERVATION_PROVIDER_UNAVAILABLE'};}}
     }
+    if(this.improved())for(let i=0;i<sources.length;i++){const source=scopedSource(sources[i],market,metar);source.id=await hash({provider_id:source.id,market_id:market.id,structured:source.structured});sources[i]=source;}
     return {sources,metar};
   }
   async factSignature(sources:Source[],metar:any){
-    return hash(sources.filter(s=>s.status==='VERIFIED').map(s=>({provider:s.provider,text:s.provider==='NOAA AWC'?{rules:metar?.rules,extreme:metar?.extreme,yes_impossible:metar?.yes_impossible,observation_time_window:metar?.latest?Math.floor(Date.parse(metar.latest)/10800000):null}:factualText(s.text)})));
+    return hash(sources.filter(s=>s.status==='VERIFIED').map(s=>({provider:s.provider,text:s.provider==='NOAA AWC'?{rules:metar?.rules,extreme:metar?.extreme,yes_impossible:metar?.yes_impossible,observation_time_window:metar?.latest?Math.floor(Date.parse(metar.latest)/10800000):null}:this.improved()&&s.structured?.facts?s.structured.facts:factualText(s.text)})));
   }
-  async preparePacket(id:string,category:Category){
+  async preparePacket(id:string,category:Category,force=false){
     if(this.run().status!=='RUNNING'||Date.now()>=Date.parse(this.repo.state()!.betting_deadline!))return;
     if(this.run().stage!=='SHADOW'&&this.repo.one('SELECT id FROM positions WHERE market_id=?',id))return;
     const market=await this.markets.inspect(id);if(!market.active||market.resolved||market.category!==category||Date.parse(market.event_end_at)<=Date.now())return;
     const {sources,metar}=await this.collectEvidence(market);
-    const q=quality(market,sources,metar,Date.now(),this.run().policy),baseline=market.books.YES?benchmark(market.books.YES):null;
+    const q=this.improved()?freshDossier(market,sources,metar,this.run().policy):quality(market,sources,metar,Date.now(),this.run().policy),baseline=market.books.YES?benchmark(market.books.YES):null;
     const facts=await this.factSignature(sources,metar),old=this.repo.one('SELECT * FROM r4_packets WHERE market_id=? ORDER BY at DESC LIMIT 1',id);
-    if(old){const previous=JSON.parse(old.payload);if(previous.facts===facts&&baseline&&previous.baseline&&Math.abs(previous.baseline.probability-baseline.probability)<.04)return;}
-    const packetId=await hash({id,facts,baseline,protocol:this.run().policy_hash});
+    if(old&&!force){const previous=JSON.parse(old.payload);if(previous.facts===facts&&baseline&&previous.baseline&&Math.abs(previous.baseline.probability-baseline.probability)<.04){if(this.improved()){previous.live={market,sources,metar,quality:q,refreshed_at:now()};this.repo.run('UPDATE r4_packets SET payload=? WHERE id=?',JSON.stringify(previous),old.id);}return;}}
+    const packetId=await hash({id,facts,baseline,protocol:this.run().policy_hash,...(force?{refresh:now()}: {})});
     const payload={market,sources,quality:q,metar,baseline,facts,policy_hash:this.run().policy_hash,previous:old?JSON.parse(old.payload).analysis||null:null};
     this.repo.putMarket(market);this.repo.run('INSERT OR IGNORE INTO r4_packets VALUES(?,?,?,?,?,?,?)',packetId,id,category,market.group,now(),q.ready&&baseline?'PREPARED':'DATA_PENDING',JSON.stringify(payload));
     this.repo.run("DELETE FROM transient_cache WHERE key='r4:event_reviews'");
-    for(const source of sources)this.repo.run('INSERT OR IGNORE INTO r4_evidence VALUES(?,?,?,?)',source.id,market.group,now(),JSON.stringify({...source,event:market.group,station:metar?.rules?.station,local_day:metar?.rules?.day,family:family(source.provider),kind:source.provider==='NOAA AWC'?'OBSERVATION':source.provider==='Polymarket'?'RULES':category==='weather'?'FORECAST':'SPORT_STATE'}));
+    this.archiveEvidence(market,sources,metar);
     if(q.ready&&baseline)this.repo.enqueue('r4:forecast:'+packetId+':'+category,'R4_FORECAST',{packet:packetId,actor:category.toUpperCase()});
     else this.repo.event('r4:pending:'+packetId,'DATA_PENDING',`Dossier « ${market.question} » : ${q.essential_missing.join(' ; ')||'Référence de prix indisponible'}. Aucun appel de prévision inutile.`,category.toUpperCase(),null,{packet:packetId});
+  }
+  archiveEvidence(market:Market,sources:Source[],metar:any){for(const source of sources)this.repo.run('INSERT OR IGNORE INTO r4_evidence VALUES(?,?,?,?)',source.id,market.group,now(),JSON.stringify({...source,event:market.group,station:metar?.rules?.station,local_day:metar?.rules?.day,family:family(source.provider),kind:source.provider==='NOAA AWC'?'OBSERVATION':source.provider==='Polymarket'?'RULES':market.category==='weather'?'FORECAST':'SPORT_STATE'}));}
+  async refreshDossier(packet:any,reason:string){
+    const market=await this.markets.inspect(packet.market_id),{sources,metar}=await this.collectEvidence(market),q=freshDossier(market,sources,metar,this.run().policy);
+    this.archiveEvidence(market,sources,metar);const facts=await this.factSignature(sources,metar);
+    if(facts!==packet.payload.facts){
+      this.repo.run("UPDATE r4_packets SET status='DEFERRED' WHERE id=?",packet.id);
+      this.repo.enqueue('r4:refresh:'+packet.id+':'+await hash(facts),'R4_PREPARE',{id:market.id,category:market.category,force:true});
+      this.repo.event(packet.id+':refresh:'+await hash(facts),'DOSSIER_REFRESH','Les faits ont changé : nouveau dossier et nouvelles prévisions avant décision.','SECRETARY',null,{market_id:market.id,reason});return null;
+    }
+    packet.payload.live={market,sources,metar,quality:q,refreshed_at:now()};this.repo.run('UPDATE r4_packets SET payload=? WHERE id=?',JSON.stringify(packet.payload),packet.id);
+    if(!q.ready){this.repo.event(packet.id+':missing:'+await hash(q.essential_missing),'DATA_PENDING','Dossier à compléter : '+q.essential_missing.join('; '),'SECRETARY',null,{market_id:market.id,reason});return null;}
+    return livePacket(packet);
   }
   blind(packet:any){
     const m=packet.payload.market as Market;
@@ -150,11 +170,16 @@ export class ReformEngine {
     if(this.run().status!=='RUNNING'||Date.now()>=Date.parse(this.repo.state()!.betting_deadline!))return;
     const packet=this.repo.packet(packetId);if(!packet||!['PREPARED','CANDIDATE','IN_MEETING'].includes(packet.status))return;
     if(this.repo.forecast(packetId,actor))return;
-    let value=await this.azure.ask('r4:independent:'+packetId+':'+actor,actor,'independent_forecast',this.blind(packet),ForecastSchema);
+    const profile=this.improved()?learningProfile(this.learningRows(actor),packet.category,'judgement',now()):null,context=this.blind(packet);
+    if(profile){const {training,...feedback}=profile;(context as any).learning_feedback=feedback;}
+    let value=await this.azure.ask('r4:independent:'+packetId+':'+actor,actor,'independent_forecast',context,ForecastSchema);
     if(this.run().status!=='RUNNING')return;
     validateForecast(value,packet.payload.sources.filter((s:Source)=>s.status==='VERIFIED').map((s:Source)=>s.id));
     if(value.method_id!=='judgement'&&!this.repo.one('SELECT id FROM r4_models WHERE id=?',value.method_id))throw Error('UNREGISTERED_STATISTICAL_METHOD');
-    if(value.probability!==null&&this.run().evaluation_cutoff&&now()>=this.run().evaluation_cutoff!){
+    if(this.improved()&&profile){
+      const selected=value.method_id===profile.method?profile:learningProfile(this.learningRows(actor),packet.category,value.method_id,profile.as_of);value=learnedForecast(value,selected);
+      const {training,...audit}=selected;this.repo.set('r4:learning:'+actor,audit);
+    }else if(value.probability!==null&&this.run().evaluation_cutoff&&now()>=this.run().evaluation_cutoff!){
       const train=independentTrainingRows(evaluationWindows(this.scored(actor).filter(r=>r.category===packet.category&&r.method===value.method_id),this.run().evaluation_cutoff!).train);
       const same=train.filter(r=>Math.min(9,Math.floor(r.probability*10))===Math.min(9,Math.floor(value.probability!*10)));
       if(same.length>=this.run().policy.minimumMethodEvents){const adjusted=calibrate(value.probability,train),interval=wilson(same.reduce((n,r)=>n+r.outcome,0),same.length);value={...value,probability:adjusted.probability,lower:Math.min(value.lower??0,interval.lower),upper:Math.max(value.upper??1,interval.upper)};this.repo.set('r4:calibration:'+actor,{at:now(),packet:packetId,training_events:new Set(same.map(r=>r.event)).size,cutoff:this.run().evaluation_cutoff,method:adjusted.method});}
@@ -173,7 +198,7 @@ export class ReformEngine {
   }
   scored(actor?:string,phase='BEFORE'):ScoredForecast[]{
     const key='r4:scored:'+(actor||'specialist')+':'+phase,cached=this.repo.cache<ScoredForecast[]>(key);if(cached)return cached;
-    const result=this.repo.rows("SELECT p.id packet_id,p.market_id,p.event_id,p.category,f.actor,f.at,f.payload forecast,json_extract(p.payload,'$.baseline.probability') baseline,o.payload outcome,o.observed_at FROM r4_forecasts f JOIN r4_packets p ON p.id=f.packet_id JOIN r4_outcomes o ON o.market_id=p.market_id WHERE f.phase=?"+(actor?' AND f.actor=?':' AND f.actor=upper(p.category)')+' ORDER BY f.at,f.packet_id',...(actor?[phase,actor]:[phase])).flatMap(r=>{const f=JSON.parse(r.forecast),o=JSON.parse(r.outcome);if(f.probability===null||!['0','1'].includes(o.payouts.YES)||r.baseline===null||r.at>=o.resolved_at)return [];return [{packet:r.packet_id,event:r.event_id,market:r.market_id,category:r.category,method:f.method_id,at:r.at,resolved_at:r.observed_at,probability:f.probability,baseline:r.baseline,outcome:Number(o.payouts.YES) as 0|1}];});this.repo.putCache(key,result,86400);return result;
+    const result=this.repo.rows("SELECT p.id packet_id,p.market_id,p.event_id,p.category,f.actor,f.at,f.payload forecast,json_extract(p.payload,'$.baseline.probability') baseline,o.payload outcome,o.observed_at FROM r4_forecasts f JOIN r4_packets p ON p.id=f.packet_id JOIN r4_outcomes o ON o.market_id=p.market_id WHERE f.phase=?"+(actor?' AND f.actor=?':' AND f.actor=upper(p.category)')+' ORDER BY f.at,f.packet_id',...(actor?[phase,actor]:[phase])).flatMap(r=>{const f=JSON.parse(r.forecast),o=JSON.parse(r.outcome);if(f.probability===null||!['0','1'].includes(o.payouts.YES)||r.baseline===null||r.at>=o.resolved_at)return [];return [{packet:r.packet_id,event:r.event_id,market:r.market_id,category:r.category,method:f.method_id,at:r.at,resolved_at:r.observed_at,probability:f.probability,raw_probability:f.raw_probability,baseline:r.baseline,outcome:Number(o.payouts.YES) as 0|1}];});this.repo.putCache(key,result,86400);return result;
   }
   qualification(){
     const run=this.run(),rows=this.scored(),test=evaluationWindows(rows,run.evaluation_cutoff||now()).test,cov=this.coverage();
@@ -216,13 +241,18 @@ export class ReformEngine {
     if(this.repo.one("SELECT id FROM r4_agendas WHERE status='RUNNING' LIMIT 1"))throw Error('R4_MEETING_BUSY');
     if(!urgent&&Date.now()-Date.parse(slot)>300000){this.repo.event('r4:missed:'+slot,'SLOT_MISSED','Créneau ordinaire manqué : une réunion retardée n’est pas présentée comme ponctuelle.','SECRETARY',null,{slot});return;}
     const list=this.repo.rows("SELECT * FROM r4_packets WHERE status='CANDIDATE' AND json_extract(payload,'$.market.event_end_at')>? ORDER BY at",now()).map(r=>({...r,payload:JSON.parse(r.payload)}));
-    const agenda:any[]=[],used=new Set();for(const p of list){if(used.has(p.category))continue;const retry=this.repo.get<any>('r4:deferred:'+p.id);if(retry&&retry.policy_hash===this.run().policy_hash&&retry.facts===p.payload.facts)continue;agenda.push(p.id);used.add(p.category);if(agenda.length===3)break;}
+    if(this.improved()){const cursor=this.repo.get<number>('r4:agenda_cursor')||0;list.sort((a,b)=>((CATEGORIES.indexOf(a.category as Category)-cursor+5)%5)-((CATEGORIES.indexOf(b.category as Category)-cursor+5)%5)||a.at.localeCompare(b.at));}
+    const agenda:any[]=[],used=new Set();for(const p of list){if(used.has(p.category))continue;const retry=this.repo.get<any>('r4:deferred:'+p.id);if(retry&&retry.policy_hash===this.run().policy_hash&&retry.facts===p.payload.facts)continue;
+      used.add(p.category);if(this.improved())try{if(!await this.refreshDossier(p,'Avant convocation'))continue;}catch(e){this.repo.event(p.id+':refresh-error:'+Math.floor(Date.now()/600000),'DATA_PENDING','Actualisation impossible avant réunion : '+String(e));continue;}
+      agenda.push(p.id);if(agenda.length===3)break;}
+    if(this.improved()&&agenda.length)this.repo.set('r4:agenda_cursor',(CATEGORIES.indexOf(this.repo.packet(agenda.at(-1)).category)+1)%5);
     const id='r4:meeting:'+slot;
     if(!agenda.length){this.repo.run('INSERT OR IGNORE INTO r4_agendas VALUES(?,?,?,?,?)',id,slot,'NO_AGENDA',now(),JSON.stringify({urgent,kickoff,summary:'Aucun dossier suffisamment étayé ; aucune discussion artificielle.',coverage:Object.fromEntries(CATEGORIES.map(c=>[c,this.repo.get('r4:scan:'+c)]))}));this.repo.event(id+':bulletin','BULLETIN','Bilan sans réunion : aucun dossier prêt. Les raisons et prochaines recherches sont consultables.');return;}
     this.repo.run('INSERT OR IGNORE INTO r4_agendas VALUES(?,?,?,?,?)',id,slot,'RUNNING',now(),JSON.stringify({agenda,index:0,kickoff,stage:'INDEPENDENT',deadline:new Date(Date.now()+this.run().policy.maximumMeetingSeconds*1000).toISOString(),urgent,proposal:null,discussion:[],missing:[],votes:[],revised:[]}));
     for(const pid of agenda)this.repo.run("UPDATE r4_packets SET status='IN_MEETING' WHERE id=?",pid);
     this.repo.event(id+':start','MEETING_START',`Le conseil examine ${agenda.length} dossier(s). Les prévisions initiales des membres seront enregistrées avant la révélation des prix et des avis.`, 'SECRETARY',id,{agenda,slot,late_seconds:(Date.now()-Date.parse(slot))/1000});this.notify(id+':start',kickoff?'Conseil de lancement':urgent?'Conseil extraordinaire':'Conseil ordinaire','Le conseil commence.');this.nextMeeting(id,'INDEPENDENT',0);
   }
+  readiness(){const result=launchReadiness(Object.fromEntries(CATEGORIES.map(c=>[c,this.repo.get('r4:preflight:'+c)]))),usage=this.repo.get<any>('r4:account_usage');const current=usage?.day===now().slice(0,10)&&Date.now()-Date.parse(usage.at)<900000;return {...result,ready:result.ready&&(!this.improved()||!!current),account_monitor:{ready:!!current,reason:current?'Mesure globale récente, avec le délai de remontée Cloudflare.':'Mesure globale de stockage absente ou périmée.'}};}
   nextMeeting(id:string,stage:string,index:number,delay=0){if(this.run().status!=='RUNNING')return;this.repo.enqueue(id+':'+index+':'+stage,'R4_MEETING',{id},new Date(Date.now()+delay).toISOString());}
   meetingRow(id:string){const row=this.repo.one('SELECT * FROM r4_agendas WHERE id=?',id);return row?{...row,payload:JSON.parse(row.payload)}:null;}
   saveMeeting(row:any){if(this.run().stopped_at&&row.status==='RUNNING'){row.status='CANCELLED';row.payload.finished_at=now();row.payload.summary='Observation archivée ; aucun fonds engagé.';}this.repo.run('UPDATE r4_agendas SET status=?,payload=? WHERE id=?',row.status,JSON.stringify(row.payload),row.id);}
@@ -232,12 +262,12 @@ export class ReformEngine {
     this.repo.event(row.id+':end','MEETING_END',reason,'SECRETARY',row.id,{status});this.notify(row.id+':end',status==='COMPLETED'?'Conseil terminé':'Incident au conseil',reason,status==='COMPLETED'?3:4);
   }
   nextDossier(row:any){
-    row.payload.index++;row.payload.stage='INDEPENDENT';row.payload.proposal=null;row.payload.discussion=[];row.payload.votes=[];row.payload.missing=[];row.payload.retried=false;
+    row.payload.index++;row.payload.stage='INDEPENDENT';row.payload.proposal=null;row.payload.discussion=[];row.payload.votes=[];row.payload.missing=[];row.payload.secretary_results=[];row.payload.retried=false;
     if(row.payload.index>=row.payload.agenda.length)return this.endMeeting(row,'COMPLETED','Les dossiers ont été examinés. Les prévisions, objections et votes sont archivés.');
     this.saveMeeting(row);this.nextMeeting(row.id,'INDEPENDENT',row.payload.index);
   }
   discussionContext(packet:any,meeting:any){
-    const p=packet.payload,m=p.market as Market;
+    packet=this.improved()?livePacket(packet):packet;const p=packet.payload,m=p.market as Market;
     return {protocol:'reform-v4',mode:this.run().stage,market:{...m,books:undefined},executable_books:m.books,proposal:meeting.payload.proposal,
       secretary_results:meeting.payload.secretary_results||[],sources:p.sources,data_quality:p.quality,observations:this.observationSummary(p.metar),
       independent_forecasts:panel(m.category).map(actor=>({actor,...this.repo.forecast(packet.id,actor)})),
@@ -264,7 +294,7 @@ export class ReformEngine {
     const spent=this.repo.rows("SELECT cost FROM positions WHERE status='PENDING'").reduce((n,x)=>n.plus(x.cost),D(0)),cluster=this.repo.rows("SELECT cost FROM positions WHERE status='PENDING' AND json_extract(payload,'$.event_group')=?",m.group).reduce((n,x)=>n.plus(x.cost),D(0));
     return allowance({initial:D(state.initial_eur).mul(state.fx!.usd_per_eur).toFixed(),cash:this.repo.cash(),spent:spent.toFixed(),clusterCost:cluster.toFixed(),elapsedFraction:(Date.now()-Date.parse(run.started_at!))/(run.policy.durationHours*3600000),probability:side==='YES'?probability:1-probability,lower:side==='YES'?f.lower:1-f.upper,price:price.toFixed(),feePerShare:fee.toFixed(),methodQualified:this.methodQualified(m.category,f.method_id)},run.policy);
   }
-  observationSummary(metar:any){if(!metar)return null;const {rows,...summary}=metar;if(!rows)return summary;const extreme=rows.find((r:any)=>r.value===metar.extreme);return {...summary,report_count:rows.length,relevant_reports:[...new Map([rows.at(-1),extreme].filter(Boolean).map((r:any)=>[r.at,r])).values()]};}
+  observationSummary(metar:any){return observationCore(metar);}
   rememberAfter(packet:any,actor:MemberId,value:any,key:string){
     const before=this.repo.forecast(packet.id,actor);if(!before||value.estimated_yes_probability==null)return;
     this.repo.saveForecast(packet.id,actor,'REVISION:'+key,{...before,probability:value.estimated_yes_probability,lower:Math.min(before.lower??0,value.estimated_yes_probability),upper:Math.max(before.upper??1,value.estimated_yes_probability),rationale:value.speech});
@@ -272,7 +302,7 @@ export class ReformEngine {
   verifyCitations(value:any,packet:any){for(const c of value.citations||[]){const source=packet.payload.sources.find((s:Source)=>s.id===c.source_id&&s.status==='VERIFIED');const norm=(x:string)=>x.replace(/\s+/g,' ').trim();if(!source||!norm(source.text).includes(norm(c.quote)))throw Error('UNVERIFIED_CITATION');}}
   speech(key:string,meeting:any,actor:MemberId,value:any,packet:any){
     this.verifyCitations(value,packet);
-    for(const request of value.document_requests||[]){const history=/histor|passé|résultat|erreur|succès|leçon/i.test(request),documents=history?this.repo.memory(packet.event_id,packet.category):this.repo.searchDocuments({event:packet.event_id,station:packet.payload.metar?.rules?.station,day:packet.payload.metar?.rules?.day});meeting.payload.secretary_results=documents;this.repo.event(key+':documents:'+request,'DOCUMENT',documents.length?'Le secrétaire retrouve '+documents.length+' document(s) ciblé(s) pour « '+request+' ».':'Aucun document vérifié ne répond à « '+request+' ».','SECRETARY',meeting.id,{request,documents});}
+    for(const request of value.document_requests||[]){const history=/histor|passé|résultat|erreur|succès|leçon/i.test(request),documents=history?this.repo.memory(packet.event_id,packet.category):this.repo.searchDocuments({event:packet.event_id,station:packet.payload.metar?.rules?.station,day:packet.payload.metar?.rules?.day,market_id:this.improved()?packet.market_id:undefined});meeting.payload.secretary_results=documents;this.repo.event(key+':documents:'+request,'DOCUMENT',documents.length?'Le secrétaire retrouve '+documents.length+' document(s) ciblé(s) pour « '+request+' ».':'Aucun document vérifié ne répond à « '+request+' ».','SECRETARY',meeting.id,{request,documents});}
     this.repo.event(key,'SPEECH',value.speech,actor,meeting.id,{...value,market_id:packet.market_id,packet_id:packet.id});this.rememberAfter(packet,actor,value,key);
   }
   async askSpeech(key:string,actor:MemberId,phase:string,context:any,schema:any,meeting:string,packet:any):Promise<any>{
@@ -283,8 +313,13 @@ export class ReformEngine {
   async meeting(id:string){
     const row=this.meetingRow(id);if(!row||row.status!=='RUNNING')return;
     if(this.run().status!=='RUNNING'||Date.now()>=Date.parse(this.repo.state()!.betting_deadline!))return this.endMeeting(row,'CANCELLED','Fenêtre de décision terminée : aucun nouvel avis ni achat.');
-    const payload=row.payload,packet=this.repo.packet(payload.agenda[payload.index]);
+    const payload=row.payload;let packet=this.repo.packet(payload.agenda[payload.index]);
     if(!packet||Date.now()>Date.parse(payload.deadline))return this.endMeeting(row,'CANCELLED','Réunion interrompue : dossier indisponible ou durée maximale dépassée.');
+    if(this.improved()){
+      const age=Date.now()-Date.parse(packet.payload.live?.refreshed_at||packet.payload.market.observed_at);
+      if(age>60000||payload.stage==='ABSTENTION')try{const fresh=await this.refreshDossier(packet,payload.stage==='ABSTENTION'?'Collecte ciblée après abstention':'Avant intervention');if(!fresh)return this.reject(row,packet,'Le dossier ne peut pas être décidé avec des faits périmés ou incomplets. Nouvelle collecte demandée.','DATA_PENDING');packet=fresh;}catch(e){return this.reject(row,packet,'Fournisseur indisponible pendant l’actualisation : '+String(e),'DATA_PENDING');}
+      else packet=livePacket(packet);
+    }
     const actors=panel(packet.category),m=packet.payload.market as Market,phase=payload.stage;
     if(Date.now()>=Date.parse(m.event_end_at)){
       this.repo.run("UPDATE r4_packets SET status='EXPIRED' WHERE id=?",packet.id);this.repo.event(id+':expired:'+packet.id,'PROPOSAL_EXPIRED','Le dossier a dépassé son échéance. Aucun achat ne sera exécuté.','SECRETARY',id);return this.nextDossier(row);
@@ -305,7 +340,7 @@ export class ReformEngine {
       let maxPrice=choice.price;if(!this.run().policy.requireQualification){const book=m.books[choice.side]!,tick=D(book.tick),probability=choice.side==='YES'?f.probability:1-f.probability;const feeCeiling=D(book.fee_rate).mul(D('.25').pow(book.fee_exponent));maxPrice=[choice.price.plus(tick.mul(this.run().policy.maximumSlippageTicks)),D(probability).minus(feeCeiling).minus(this.run().policy.minimumEstimatedEdge)].reduce((a,b)=>a.lt(b)?a:b).div(tick).floor().mul(tick);if(maxPrice.lt(choice.price))maxPrice=choice.price;}
       payload.proposal={id:id+':'+packet.market_id,meeting_id:id,market_id:packet.market_id,version:1,side:choice.side,amount,max_price:maxPrice.toFixed(),status:'DISCUSSING',reason:f.rationale,created_at:now(),estimated_yes_probability:f.probability,initial_estimated_yes_probability:f.probability};
       this.repo.putProposal(payload.proposal);payload.stage='DISCUSS';
-      packet.payload.analysis=f;this.repo.run('UPDATE r4_packets SET payload=? WHERE id=?',JSON.stringify(packet.payload),packet.id);
+      const original=this.repo.packet(packet.id);original.payload.analysis=f;this.repo.run('UPDATE r4_packets SET payload=? WHERE id=?',JSON.stringify(original.payload),packet.id);
       this.repo.event(id+':reveal:'+packet.id,'FORECAST_REVEAL','Les prévisions initiales indépendantes sont maintenant révélées avec les prix.','SECRETARY',id,{forecasts:actors.map(actor=>({actor,...this.repo.forecast(packet.id,actor)})),baseline:packet.payload.baseline});
     }else if(phase==='DISCUSS'){
       const context=this.discussionContext(packet,row),independents=(['QUANT','RISK','CONTRA'] as MemberId[]).filter(a=>!payload.missing.includes(a));
@@ -385,7 +420,7 @@ export class ReformEngine {
   async reject(row:any,packet:any,reason:string,status:string){
     const p=row.payload.proposal as Proposal;if(p){p.status=status;this.repo.putProposal(p);}
     let execution:any=null,book:any=null,failure:string|null=null;
-    if(p)try{const m=await this.markets.inspect(p.market_id);book=m.books[p.side];if(m.delay_seconds>0)failure='MATCHING_DELAY_NOT_OBSERVED';else if(book)execution=execute(book,D(10).mul(this.repo.state()!.fx!.usd_per_eur).toFixed(),p.max_price,now());else failure='NO_OBSERVABLE_BOOK';}catch{failure='PROVIDER_UNAVAILABLE';}
+    if(p&&!(this.improved()&&status==='DATA_PENDING'))try{const m=await this.markets.inspect(p.market_id);book=m.books[p.side];if(m.delay_seconds>0)failure='MATCHING_DELAY_NOT_OBSERVED';else if(book)execution=execute(book,D(10).mul(this.repo.state()!.fx!.usd_per_eur).toFixed(),p.max_price,now());else failure='NO_OBSERVABLE_BOOK';}catch{failure='PROVIDER_UNAVAILABLE';}
     this.repo.run('INSERT OR IGNORE INTO r4_assessments VALUES(?,?,?,?)',row.id+':'+packet.id+':rejection',now(),packet.id,JSON.stringify({kind:'REJECTION',proposal:p,reason,ex_ante_review:reason,portfolio_impact:false,observed_book:book,execution,failure,reference_eur:'10'}));
     this.repo.run("UPDATE r4_packets SET status='REVIEWED' WHERE id=?",packet.id);this.repo.event(row.id+':decision:'+packet.id,'DECISION',reason,'SECRETARY',row.id,{status,proposal:p});return this.nextDossier(row);
   }
@@ -402,7 +437,7 @@ export class ReformEngine {
   }
   summary(){
     const run=this.run(),s=this.repo.state()!,fx=s.fx?.usd_per_eur||'1',positions=this.repo.rows('SELECT * FROM positions ORDER BY created_at DESC').map(x=>{const payload=JSON.parse(x.payload);return {...x,payload,cost_eur:D(x.cost).div(fx).toFixed(),fees_eur:D(payload.fees||'0').div(fx).toFixed(),profit_eur:payload.profit===undefined?null:D(payload.profit).div(fx).toFixed()};});
-    let calls=this.repo.cache<any[]>('r4:call_metrics');if(!calls){calls=this.repo.rows("SELECT actor,meeting_id,status,input_tokens,output_tokens,cached_tokens,estimated_eur FROM calls WHERE id NOT LIKE '%:result'");this.repo.putCache('r4:call_metrics',calls,600);}
+    let calls=this.repo.cache<any[]>('r4:call_metrics');if(!calls){calls=this.repo.rows("SELECT actor,meeting_id,status,input_tokens,output_tokens,cached_tokens,cache_write_tokens,estimated_eur FROM calls WHERE id NOT LIKE '%:result'");this.repo.putCache('r4:call_metrics',calls,600);}
     let evaluation=this.repo.cache<any>('r4:evaluation');if(!evaluation){evaluation={score:score(this.scored()),chair:score(this.scored('CHAIR','AFTER')),qualification:this.qualification(),at:now()};this.repo.putCache('r4:evaluation',evaluation,600);}const initialScore=evaluation.score,chair=evaluation.chair;
     const meetings=this.repo.rows('SELECT * FROM r4_agendas ORDER BY at DESC LIMIT 40').map(x=>({...x,payload:JSON.parse(x.payload)}));
     const expected=run.started_at?nextSlots(run.started_at,run.end_at,100,run.policy.meetingHours).filter(t=>Date.parse(t)<=Date.now()):[],ordinary=this.repo.rows("SELECT slot,status,payload,at FROM r4_agendas WHERE json_extract(payload,'$.urgent') IS NOT 1 AND json_extract(payload,'$.kickoff') IS NOT 1");
@@ -411,13 +446,13 @@ export class ReformEngine {
     const total=(field:string)=>calls.reduce((n,c)=>n+Number(c[field]||0),0);
     const cost=calls.reduce((n,c)=>{if(c.estimated_eur){const x=JSON.parse(c.estimated_eur);n.min+=Number(x.min);n.max+=Number(x.max);}return n;},{min:0,max:0});
     const late=positions.filter(x=>x.status==='PENDING').map(x=>({market_id:x.market_id,question:x.payload.question,event_end_at:x.payload.end_at,age_hours:Math.max(0,(Date.now()-Date.parse(x.payload.end_at))/3600000)}));
-    return {run,active_code_version:this.activeCode(),protocol_current:this.protocolCurrent(),preflight:Object.fromEntries(CATEGORIES.map(c=>[c,this.repo.get('r4:preflight:'+c)])),legacy_lessons:this.repo.get('r4:legacy_lessons'),comparisons:this.comparisons(),members:MEMBERS,mode:run.stage,display_status:run.status==='READY'?'Protocole prêt, lancement explicite requis':run.stage==='SHADOW'?'Prévisions en observation, aucune mise':'Fonds fictif '+run.stage,
+    return {run,active_code_version:this.activeCode(),protocol_current:this.protocolCurrent(),account_storage:this.repo.get('r4:account_usage'),readiness:this.readiness(),learning:Object.fromEntries(MEMBERS.filter(m=>m.id!=='SECRETARY').map(m=>[m.id,this.repo.get('r4:learning:'+m.id)])),preflight:Object.fromEntries(CATEGORIES.map(c=>[c,this.repo.get('r4:preflight:'+c)])),legacy_lessons:this.repo.get('r4:legacy_lessons'),comparisons:this.comparisons(),members:MEMBERS,mode:run.stage,display_status:run.status==='READY'?'Protocole prêt, lancement explicite requis':run.stage==='SHADOW'?'Prévisions en observation, aucune mise':'Fonds fictif '+run.stage,
       cash_eur:D(cash).div(fx).toFixed(),committed_at_cost_eur:committed.div(fx).toFixed(),profit_eur:positions.filter(x=>x.status==='SETTLED').reduce((n,x)=>n.plus(x.payload.profit),D(0)).div(fx).toFixed(),positions,pending_resolutions:late,settlement_errors:this.repo.rows("SELECT key,value FROM meta WHERE key LIKE 'r4:settlement_error:%'").map(r=>({market_id:r.key.slice('r4:settlement_error:'.length),...JSON.parse(r.value)})),
       score:initialScore,chair_score:chair,qualification:evaluation.qualification,evaluation_at:evaluation.at,coverage:this.coverage(),health:this.repo.get('r4:health'),scans:Object.fromEntries(CATEGORIES.map(c=>[c,this.repo.get('r4:scan:'+c)])),
       meetings,meeting_metrics:{expected:expected.length,completed:ordinary.filter(m=>m.status==='COMPLETED').length,bilans:ordinary.filter(m=>m.status==='NO_AGENDA').length,on_time:onTime,missing:expected.filter(t=>!ordinary.some(m=>m.slot===t))},
-      packets:this.repo.rows('SELECT id,market_id,category,event_id,at,status,payload FROM r4_packets ORDER BY at DESC LIMIT 60').map(x=>{const p=JSON.parse(x.payload);return {id:x.id,market_id:x.market_id,category:x.category,event:x.event_id,at:x.at,status:x.status,question:p.market.question,url:p.market.url,quality:p.quality,baseline:p.baseline,observations:p.metar,sources:p.sources.map((s:Source)=>({id:s.id,title:s.title,url:s.url,provider:s.provider,status:s.status,fetched_at:s.fetched_at})),forecast:this.repo.forecast(x.id,x.category.toUpperCase())};}),
+      packets:this.repo.rows('SELECT id,market_id,category,event_id,at,status,payload FROM r4_packets ORDER BY at DESC LIMIT 60').map(x=>{const p=JSON.parse(x.payload);return {id:x.id,market_id:x.market_id,category:x.category,event:x.event_id,at:x.at,status:x.status,question:p.market.question,url:p.market.url,last_refreshed_at:p.live?.refreshed_at||x.at,quality:p.live?.quality||p.quality,baseline:p.baseline,observations:p.live?.metar||p.metar,sources:(p.live?.sources||p.sources).map((s:Source)=>({id:s.id,title:s.title,url:s.url,provider:s.provider,status:s.status,fetched_at:s.fetched_at})),forecast:this.repo.forecast(x.id,x.category.toUpperCase())};}),
       memory:this.repo.rows('SELECT * FROM r4_outcomes ORDER BY observed_at DESC LIMIT 30').map(x=>({...x,payload:JSON.parse(x.payload)})),
-      azure:{requests:calls.length,input_tokens:total('input_tokens'),output_tokens:total('output_tokens'),cached_tokens:total('cached_tokens'),unknown:calls.filter(c=>c.status==='UNKNOWN').length,estimated_eur_min:cost.min,estimated_eur_max:cost.max,invoice:false,by_actor:MEMBERS.map(m=>({actor:m.id,requests:calls.filter(c=>c.actor===m.id).length})),by_meeting:[...new Set(calls.map(c=>c.meeting_id).filter(Boolean))].map(id=>({meeting_id:id,requests:calls.filter(c=>c.meeting_id===id).length,input_tokens:calls.filter(c=>c.meeting_id===id).reduce((n,c)=>n+c.input_tokens,0),output_tokens:calls.filter(c=>c.meeting_id===id).reduce((n,c)=>n+c.output_tokens,0)})),scope:run.id},
+      azure:{requests:calls.length,input_tokens:total('input_tokens'),output_tokens:total('output_tokens'),cached_tokens:total('cached_tokens'),cache_write_tokens:total('cache_write_tokens'),unknown:calls.filter(c=>c.status==='UNKNOWN').length,estimated_eur_min:cost.min,estimated_eur_max:cost.max,invoice:false,reported_cost:this.repo.get('r4:billing'),by_actor:MEMBERS.map(m=>({actor:m.id,requests:calls.filter(c=>c.actor===m.id).length})),by_meeting:[...new Set(calls.map(c=>c.meeting_id).filter(Boolean))].map(id=>({meeting_id:id,requests:calls.filter(c=>c.meeting_id===id).length,input_tokens:calls.filter(c=>c.meeting_id===id).reduce((n,c)=>n+c.input_tokens,0),output_tokens:calls.filter(c=>c.meeting_id===id).reduce((n,c)=>n+c.output_tokens,0)})),scope:run.id},
       limitations:['Une qualification passée ne garantit aucune performance future.','Une fin d’événement n’est pas une garantie de règlement à temps.','Un score sans résultat disponible reste inconnu.','Les domaines sans connecteur adéquat restent explicitement limités.']};
   }
 }

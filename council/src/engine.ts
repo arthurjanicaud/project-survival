@@ -497,6 +497,7 @@ export class Engine {
     }
   }
   async dispatchNotifications(){
+    if(this.env.NTFY_DELIVERY==='github-relay')return; // Scheduled consumer owns delivery in every phase.
     if(!this.env.GITHUB_NOTIFIER_TOKEN||!this.repo.one("SELECT id FROM notifications WHERE status='PENDING' LIMIT 1"))return;
     const old=this.repo.get<any>('notification_relay');
     if(old?.dispatched_at&&Date.now()-Date.parse(old.dispatched_at)<30000){this.repo.enqueue('notification-relay:'+old.dispatched_at,'NOTIFY_RELAY',{},new Date(Date.parse(old.dispatched_at)+31000).toISOString());return;}

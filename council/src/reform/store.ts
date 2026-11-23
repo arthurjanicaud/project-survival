@@ -50,8 +50,8 @@ export class ReformRepository extends Repository {
     for(const row of this.rows("SELECT * FROM r4_outcomes WHERE json_extract(payload,'$.category')=? ORDER BY observed_at DESC LIMIT 6",category))if(!result.some(x=>x.market_id===row.market_id))result.push(row);
     return result.slice(0,6).map(x=>({market_id:x.market_id,event:x.event_id,known_at:x.observed_at,...JSON.parse(x.payload)}));
   }
-  searchDocuments(request:{event:string;source_kind?:string;station?:string;day?:string}){
-    return this.rows('SELECT * FROM r4_evidence WHERE event_id=? ORDER BY at DESC LIMIT 30',request.event).map(x=>JSON.parse(x.payload)).filter(x=>(!request.station||x.station===request.station)&&(!request.day||x.local_day===request.day)&&(!request.source_kind||x.kind===request.source_kind)).slice(0,3);
+  searchDocuments(request:{event:string;source_kind?:string;station?:string;day?:string;market_id?:string}){
+    return this.rows('SELECT * FROM r4_evidence WHERE event_id=?'+(request.market_id?" AND json_extract(payload,'$.market_id')=?":'')+' ORDER BY at DESC LIMIT 30',request.event,...(request.market_id?[request.market_id]:[])).map(x=>JSON.parse(x.payload)).filter(x=>(!request.station||x.station===request.station)&&(!request.day||x.local_day===request.day)&&(!request.source_kind||x.kind===request.source_kind)).slice(0,3);
   }
   page(table:string,after=0,limit=50){
     const extra=['r4_packets','r4_evidence','r4_forecasts','r4_outcomes','r4_cycles','r4_assessments','r4_agendas','r4_models','r4_usage'];
