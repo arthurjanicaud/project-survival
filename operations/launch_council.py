@@ -83,7 +83,12 @@ def main():
                 try:
                     ready = get('/admin/readiness')
                     launch = get('/admin/launch-health')
-                except httpx.HTTPError:
+                except httpx.HTTPError as error:
+                    if isinstance(error, httpx.HTTPStatusError) and error.response.status_code == 503:
+                        # Natural cycle expiry also closes HTTP while the host
+                        # finishes publishing. Its exit code remains authoritative.
+                        process.wait(timeout=90)
+                        break
                     if process.poll() is None:
                         raise
                     break
