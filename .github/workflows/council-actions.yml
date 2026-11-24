@@ -55,3 +55,12 @@ jobs:
         working-directory: council
       - name: Process jobs, publish durable checkpoints, relay notifications
         run: python -u -m operations.actions_council
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: council-actions-diagnostic-${{ github.run_id }}
+          path: |
+            data/actions/validation.json
+            exports/phase3/research-latest.json
+          retention-days: 3
+          if-no-files-found: ignore
