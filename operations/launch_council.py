@@ -71,6 +71,11 @@ def main():
                 post('/admin/preflight')
             last_collect = 0
             while process.poll() is None:
+                if stop_requested:
+                    # A graceful stop closes HTTP before its final durable checkpoint.
+                    # Do not interpret that expected 503 as a failed experiment.
+                    time.sleep(1)
+                    continue
                 if time.monotonic()-last_collect > 45:
                     if not service_pass(process, [research]):
                         break
