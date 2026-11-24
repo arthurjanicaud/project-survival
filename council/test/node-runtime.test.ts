@@ -33,3 +33,8 @@ test('Local host denies admin access and START; a restart never credits a fund',
   const denied=await fetch('http://127.0.0.1:'+port+'/admin/start',{method:'POST'});assert.equal(denied.status,401);const blocked=await fetch('http://127.0.0.1:'+port+'/admin/start',{method:'POST',headers:{Authorization:'Bearer test-local-admin'}});assert.equal(blocked.status,403);await task;
  }const s=storage(join(dir,'full.sqlite'));assert.equal(s.db.prepare('SELECT count(*) n FROM ledger').get()!.n,0);s.db.close();}finally{rmSync(dir,{recursive:true,force:true});}
 });
+
+test('Node fetches a missing sports feed directly and shares its real timestamp; Worker still defers to collector',async()=>{
+ const {Markets}=await import('../src/markets'),dir=mkdtempSync(join(tmpdir(),'survival-source-'));try{const s=storage(join(dir,'fund.sqlite')),r=new ReformRepository(s.sql,s.atomic);r.migrateReform();let calls=0;const url='https://site.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard?dates=20261124';const m=new Markets(r,async()=>{calls++;return Response.json({events:[{id:'observed'}]});});
+ await assert.rejects(()=>m.get(url),/SHARED_RESEARCH_FEED/);assert.equal(calls,0);r.set('runtime:backend','github-sqlite');const first=await m.get(url);const at=r.cache<any>('research:'+url)!.fetched_at;assert.equal(first.events[0].id,'observed');await m.get(url);assert.equal(calls,1);assert.equal(r.cache<any>('research:'+url)!.fetched_at,at);assert.equal(r.sourceDemands().length,0);r.putCache('research:'+url,{fetched_at:new Date(Date.now()-360000).toISOString(),data:{events:[{id:'old'}]}},900);await m.get(url,900,300);assert.equal(calls,2);s.db.close();}finally{rmSync(dir,{recursive:true,force:true});}
+});
