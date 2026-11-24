@@ -1,5 +1,10 @@
 name: Council on GitHub (durable SQLite)
 on:
+  workflow_call:
+    inputs:
+      preflight:
+        type: boolean
+        default: false
   workflow_dispatch:
     inputs:
       preflight:
@@ -17,7 +22,7 @@ jobs:
   council:
     if: github.event_name == 'workflow_dispatch' || vars.COUNCIL_ACTIONS_ENABLED == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     env:
       GH_TOKEN: ${{ github.token }}
       COUNCIL_STATE_KEY: ${{ secrets.COUNCIL_STATE_KEY }}
@@ -28,7 +33,7 @@ jobs:
       COUNCIL_AZURE_DEPLOYMENT: ${{ vars.COUNCIL_AZURE_DEPLOYMENT || 'gpt-6.1-sol-3' }}
       COUNCIL_NO_LLM: ${{ inputs.preflight && 'true' || 'false' }}
       COUNCIL_PREFLIGHT: ${{ inputs.preflight && 'true' || 'false' }}
-      COUNCIL_RUN_SECONDS: '240'
+      COUNCIL_RUN_SECONDS: ${{ inputs.preflight && '420' || '240' }}
       COUNCIL_DATA_DIR: ${{ github.workspace }}/data/actions
       COUNCIL_STATE_DIR: ${{ github.workspace }}/data/state-checkout
       COUNCIL_PUBLISH: 'true'

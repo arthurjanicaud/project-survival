@@ -51,4 +51,8 @@ Le contrôle de reconstruction sur disque vérifie l'intégrité de la sauvegarde, l
 
 Arrêter les dispatchs d'abord (`COUNCIL_ACTIONS_ENABLED=false`) et attendre la fin du seul runner. Lire le manifeste courant de `survival-state`, récupérer les assets désignés et vérifier leur SHA-256. Avec la clé de secours, `node --import tsx src/node/state-cli.ts restore` restaure les bases dans `COUNCIL_DATA_DIR`. Ne jamais restaurer par-dessus un processus SQLite actif ou un fichier WAL.
 
+Commande d'export local, depuis `council` : `node --import tsx src/node/export-cli.ts ../data/actions/full.sqlite ../exports/actions-json-csv`. Le répertoire doit être neuf ; les sommes restent des chaînes décimales et la base source est ouverte en lecture seule.
+
 Les anciennes archives gzip NDJSON et leurs manifestes restent disponibles localement dans `exports/actions-migration`. L'export JSON/CSV peut être réalisé en lecture sur ces bases SQLite ; aucun appel de marché ni aucune IA n'est nécessaire pour lire le journal, les positions, les votes ou les débats.
+
+Les réveils ordinaires sans fonds actif ni précontrôle à reprendre se terminent immédiatement après la restauration. Le workflow de validation réutilise le même moteur, sans Azure et sans START, deux fois par heure jusqu’à la borne `COUNCIL_VALIDATION_UNTIL` ; il partage le verrou du moteur.

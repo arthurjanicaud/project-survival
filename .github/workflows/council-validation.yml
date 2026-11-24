@@ -4,44 +4,32 @@ on:
   schedule:
     - cron: '7,37 * * * *'
 permissions:
-  contents: read
+  contents: write
 concurrency:
   group: council-readiness-validation
   cancel-in-progress: false
 jobs:
-  validate:
-    if: vars.COUNCIL_ACTIONS_ENABLED != 'true' && (github.event_name == 'workflow_dispatch' || vars.COUNCIL_VALIDATION_UNTIL != '')
+  window:
+    if: vars.COUNCIL_ACTIONS_ENABLED == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 12
-    env:
-      COUNCIL_API_URL: ${{ vars.COUNCIL_API_URL }}
-      COUNCIL_ADMIN_TOKEN: ${{ secrets.COUNCIL_ADMIN_TOKEN }}
-      COUNCIL_VALIDATION_UNTIL: ${{ vars.COUNCIL_VALIDATION_UNTIL }}
+    outputs:
+      enabled: ${{ steps.window.outputs.enabled }}
     steps:
-      - name: Check finite observation window
-        id: window
+      - id: window
+        env:
+          UNTIL: ${{ vars.COUNCIL_VALIDATION_UNTIL }}
         run: |
           python - <<'PY'
-          from datetime import datetime,timezone
           import os
-          until=os.environ.get('COUNCIL_VALIDATION_UNTIL')
+          from datetime import datetime,timezone
+          until=os.environ.get('UNTIL')
           enabled=os.environ['GITHUB_EVENT_NAME']=='workflow_dispatch' or bool(until and datetime.fromisoformat(until.replace('Z','+00:00'))>datetime.now(timezone.utc))
           with open(os.environ['GITHUB_OUTPUT'],'a') as f:f.write('enabled='+str(enabled).lower()+'\n')
           PY
-      - uses: actions/checkout@v4
-        if: steps.window.outputs.enabled == 'true'
-      - uses: actions/setup-python@v5
-        if: steps.window.outputs.enabled == 'true'
-        with:
-          python-version: '3.12'
-      - run: pip install httpx python-dotenv
-        if: steps.window.outputs.enabled == 'true'
-      - name: Validate five real source chains without starting a fund
-        if: steps.window.outputs.enabled == 'true'
-        run: python -m operations.reform_validation
-      - uses: actions/upload-artifact@v4
-        if: always() && steps.window.outputs.enabled == 'true'
-        with:
-          name: council-source-validation-${{ github.run_id }}
-          path: output/validation/*.json
-          retention-days: 7
+  validate:
+    needs: window
+    if: needs.window.outputs.enabled == 'true'
+    uses: ./.github/workflows/council-actions.yml
+    with:
+      preflight: true
+    secrets: inherit
