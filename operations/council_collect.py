@@ -100,9 +100,9 @@ def research(force=False):
             futures={pool.submit(collect,url):url for url in urls}
             for f in as_completed(futures):
                 try:results.append(f.result())
-                except Exception as e:results.append({'url':futures[f],'status':'ERROR','error':type(e).__name__})
+                except Exception as e:results.append({'url':futures[f],'status':'ERROR','error':type(e).__name__,'http_status':e.response.status_code if isinstance(e,httpx.HTTPStatusError) else None})
     target=ROOT/'exports/phase3/research-latest.json';target.parent.mkdir(parents=True,exist_ok=True);target.write_text(json.dumps({'at':datetime.now(timezone.utc).isoformat(),'sources':results},indent=2),encoding='utf-8')
-    ok=sum(r['status']=='OK' for r in results);print(json.dumps({'sources_ok':ok,'sources_failed':len(results)-ok,'bytes_sent':sum(r.get('bytes',0) for r in results)}))
+    ok=sum(r['status']=='OK' for r in results);print(json.dumps({'sources_ok':ok,'sources_failed':len(results)-ok,'bytes_sent':sum(r.get('bytes',0) for r in results),'failed_sources':[r for r in results if r['status']=='ERROR']}))
     if ok==0:raise RuntimeError('No public research source available')
 def notifications():
     cfg=configuration();api=cfg['COUNCIL_API_URL'];headers={'Authorization':'Bearer '+cfg['COUNCIL_ADMIN_TOKEN']}

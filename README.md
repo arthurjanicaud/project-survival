@@ -192,4 +192,4 @@ REMEDIATION.md. Un contr√¥le non ex√©cut√© n'est jamais annonc√© r√©ussi.
 
 ## Moteur du conseil sur GitHub Actions
 
-La migration du conseil vers Node/SQLite et les sauvegardes chiffrÈes GitHub sont dÈcrites dans [le guide dÈdiÈ](docs/GITHUB_COUNCIL.md). Elle ne lance aucune nouvelle compÈtition et conserve les comptes des phases terminÈes.
+La migration du conseil vers Node/SQLite et les sauvegardes chiffr√©es GitHub sont d√©crites dans [le guide d√©di√©](docs/GITHUB_COUNCIL.md). Elle ne lance aucune nouvelle comp√©tition et conserve les comptes des phases termin√©es.

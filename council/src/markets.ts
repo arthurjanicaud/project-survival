@@ -142,13 +142,15 @@ export class Markets {
     const raw=await this.get(`${GAMMA}/markets/${encodeURIComponent(id)}`),rows=await this.resolutionRows(raw);
     return {market_id:id,wire_market:Object.fromEntries(['id','version','closed','active','conditionId','condition_id','questionID','questionId','umaResolutionStatus','resolutionStatus','outcomes','outcomePrices'].map(k=>[k,raw[k]??null])),wire_resolutions:rows,final:finalResolution(raw,rows)};
   }
-  async get(url:string,cacheSeconds=0):Promise<any>{
+  async get(url:string,cacheSeconds=0,maximumAgeSeconds=900):Promise<any>{
     const u=new URL(url);if(!allowed.has(u.hostname)||u.protocol!=='https:'||u.username||u.password)throw Error('PROVIDER_NOT_ALLOWED');
     const research=this.repo.cache<any>('research:'+url),age=research?Date.now()-Date.parse(research.fetched_at):NaN;
-    if(research&&Number.isFinite(age)&&age>=-5000&&age<900000){if(age>=600000)this.repo.requestSource(url);return research.data;}
-    if(['site.api.espn.com','site.web.api.espn.com','sports.core.api.espn.com','api.opendota.com'].includes(u.hostname)){this.repo.requestSource(url);throw Error('SHARED_RESEARCH_FEED_MISSING_OR_STALE');}
-    if(cacheSeconds){const cached=this.repo.cache(url);if(cached)return cached;}
+    if(research&&Number.isFinite(age)&&age>=-5000&&age<Math.min(900,maximumAgeSeconds)*1000){if(age>=Math.min(600000,maximumAgeSeconds*750))this.repo.requestSource(url);return research.data;}
+    const shared=['site.api.espn.com','site.web.api.espn.com','sports.core.api.espn.com','api.opendota.com'].includes(u.hostname),native=shared&&this.repo.get('runtime:backend')==='github-sqlite';
+    if(shared&&!native){this.repo.requestSource(url);throw Error('SHARED_RESEARCH_FEED_MISSING_OR_STALE');}
+    if(cacheSeconds&&!native){const cached=this.repo.cache(url);if(cached)return cached;}
     const cooldown=this.repo.get<any>('provider_cooldown:'+u.hostname);if(cooldown?.until&&Date.parse(cooldown.until)>Date.now())throw Error('PROVIDER_RATE_LIMITED');
+    if(native){const last=this.repo.get<number>('provider:last:'+u.hostname)||0,spacing=u.hostname==='api.opendota.com'?1100:100;const wait=spacing-(Date.now()-last);if(wait>0)await new Promise(r=>setTimeout(r,wait));this.repo.set('provider:last:'+u.hostname,Date.now());}
     for(let a=0;a<2;a++){
       const c=new AbortController(),timer=setTimeout(()=>c.abort(),CONFIG.fetchTimeoutMs);
       try{
@@ -156,7 +158,7 @@ export class Markets {
         if(!r.ok){await r.body?.cancel();const retry=r.headers.get('retry-after'),parsed=Number(retry),wait=retry&&Number.isNaN(parsed)?Math.max(1,(Date.parse(retry)-Date.now())/1000):Math.max(1,Number.isFinite(parsed)?parsed:1);if(r.status===429)this.repo.set('provider_cooldown:'+u.hostname,{until:new Date(Date.now()+wait*1000).toISOString()});if((r.status===429||r.status>=500)&&a===0&&wait<=5){await new Promise(q=>setTimeout(q,(wait+.2)*1000));continue;}throw Error('PROVIDER_HTTP_'+r.status);}
         if(Number(r.headers.get('content-length')||0)>8_000_000){await r.body?.cancel();throw Error('PROVIDER_RESPONSE_TOO_LARGE');}
         const text=await r.text();if(text.length>8_000_000)throw Error('PROVIDER_RESPONSE_TOO_LARGE');
-        const data=JSON.parse(text);if(cacheSeconds){this.repo.putCache(url,data,cacheSeconds);this.repo.putCache('observed:'+url,now(),cacheSeconds);}return data;
+        const data=JSON.parse(text);if(native){this.repo.putCache('research:'+url,{fetched_at:now(),data},900);this.repo.run('DELETE FROM meta WHERE key=?','source_demand:'+url);}if(cacheSeconds){this.repo.putCache(url,data,cacheSeconds);this.repo.putCache('observed:'+url,now(),cacheSeconds);}return data;
       }finally{clearTimeout(timer);}
     }throw Error('PROVIDER_UNAVAILABLE');
   }
@@ -209,30 +211,31 @@ export class Markets {
     }
     return m;
   }
-  async source(url:string,title:string,provider:string,select:(data:any)=>any):Promise<Source>{
-    try{const raw=await this.get(url,900),selected=select(raw);if(!selected||Array.isArray(selected)&&!selected.length)throw Error('NO_MATCHING_DATA');const text=typeof selected==='string'?selected:JSON.stringify(selected),fetched_at=this.repo.cache<any>('research:'+url)?.fetched_at||this.repo.cache<string>('observed:'+url)||now();const source:Source={id:await hash({url,text,fetched_at}),url,title,text:text.slice(0,CONFIG.documentChars),fetched_at,provider,status:'VERIFIED'};this.repo.document(source);return source;}
+  async source(url:string,title:string,provider:string,select:(data:any)=>any,maximumAgeSeconds=900):Promise<Source>{
+    try{const raw=await this.get(url,900,maximumAgeSeconds),selected=select(raw);if(!selected||Array.isArray(selected)&&!selected.length)throw Error('NO_MATCHING_DATA');const text=typeof selected==='string'?selected:JSON.stringify(selected),fetched_at=this.repo.cache<any>('research:'+url)?.fetched_at||this.repo.cache<string>('observed:'+url)||now();const source:Source={id:await hash({url,text,fetched_at}),url,title,text:text.slice(0,CONFIG.documentChars),fetched_at,provider,status:'VERIFIED'};this.repo.document(source);return source;}
     catch(e){const code=e instanceof Error?e.message.slice(0,180):'UNAVAILABLE';if(code!=='NO_MATCHING_DATA'){const previous=this.repo.get<any>('provider_error:'+provider);if(!previous||previous.code!==code||Date.now()-Date.parse(previous.at)>600000)this.repo.set('provider_error:'+provider,{at:now(),code});}return {id:await hash(url),url,title,text:'Source indisponible : '+code,fetched_at:now(),provider,status:'UNAVAILABLE'};}
   }
   async evidence(m:Market):Promise<Source[]>{
-    const sources:Source[]=[];
+    const sources:Source[]=[],maxAge=m.category!=='weather'&&m.start_at&&Date.parse(m.start_at)<=Date.now()?300:900;
+    const source=(url:string,title:string,provider:string,select:(data:any)=>any)=>this.source(url,title,provider,select,maxAge);
     const rules:Source={id:await hash({id:m.id,rules:m.description}),url:m.url,title:'Règles officielles du marché',text:m.description,fetched_at:now(),status:'VERIFIED',provider:'Polymarket'};this.repo.document(rules);sources.push(rules);
     if(m.category==='weather'){
       const stationText=m.description+' '+m.resolution_source;
       const city=cities.find(c=>new RegExp('\\b'+c.station+'\\b','i').test(stationText))||cities.find(c=>c.names.test(m.question));if(!city)return sources;
       const url=`https://api.open-meteo.com/v1/forecast?latitude=${city.lat}&longitude=${city.lon}&daily=temperature_2m_max,temperature_2m_min,precipitation_sum&timezone=${encodeURIComponent(city.tz)}&forecast_days=8&temperature_unit=${/°F|fahrenheit/i.test(m.question)?'fahrenheit':'celsius'}`;
-      sources.push(await this.source(url,`Prévision maillée près de ${city.station} (pas une mesure de station)`,'Open-Meteo',d=>({location:{station_reference:city.station,grid_latitude:d.latitude,grid_longitude:d.longitude,timezone:d.timezone},units:d.daily_units,forecast:d.daily,limitation:'Grid forecast, not official final station observations. No historical error calibration supplied.'})));
+      sources.push(await source(url,`Prévision maillée près de ${city.station} (pas une mesure de station)`,'Open-Meteo',d=>({location:{station_reference:city.station,grid_latitude:d.latitude,grid_longitude:d.longitude,timezone:d.timezone},units:d.daily_units,forecast:d.daily,limitation:'Grid forecast, not official final station observations. No historical error calibration supplied.'})));
       const day=new Intl.DateTimeFormat('en-CA',{timeZone:city.tz,year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date(m.start_at||m.event_end_at));
-      sources.push(await this.source(`https://ensemble-api.open-meteo.com/v1/ensemble?latitude=${city.lat}&longitude=${city.lon}&daily=temperature_2m_max,temperature_2m_min&models=ecmwf_ifs025_ensemble&timezone=${encodeURIComponent(city.tz)}&forecast_days=8&temperature_unit=${/°F|fahrenheit/i.test(m.question)?'fahrenheit':'celsius'}`,`Distribution de prévisions ECMWF près de ${city.station}`,'Open-Meteo Ensemble',d=>ensembleSummary(d,day)));
+      sources.push(await source(`https://ensemble-api.open-meteo.com/v1/ensemble?latitude=${city.lat}&longitude=${city.lon}&daily=temperature_2m_max,temperature_2m_min&models=ecmwf_ifs025_ensemble&timezone=${encodeURIComponent(city.tz)}&forecast_days=8&temperature_unit=${/°F|fahrenheit/i.test(m.question)?'fahrenheit':'celsius'}`,`Distribution de prévisions ECMWF près de ${city.station}`,'Open-Meteo Ensemble',d=>ensembleSummary(d,day)));
       if(city.station.startsWith('K')){
-        try{const point=await this.get(`https://api.weather.gov/points/${city.lat},${city.lon}`,86400);if(point.properties?.forecast)sources.push(await this.source(point.properties.forecast,`Prévision officielle NWS près de ${city.station}`,'NWS',d=>({updated:d.properties?.updated,periods:d.properties?.periods?.slice(0,12),limitation:'Forecast, not final observations; station and market rules remain controlling.'})));}catch{/* Grid source is explicitly labelled; no fabricated official forecast. */}
+        try{const point=await this.get(`https://api.weather.gov/points/${city.lat},${city.lon}`,86400);if(point.properties?.forecast)sources.push(await source(point.properties.forecast,`Prévision officielle NWS près de ${city.station}`,'NWS',d=>({updated:d.properties?.updated,periods:d.properties?.periods?.slice(0,12),limitation:'Forecast, not final observations; station and market rules remain controlling.'})));}catch{/* Grid source is explicitly labelled; no fabricated official forecast. */}
       }
     }else if(m.category==='esport'){
       // An organisation's CS/LoL roster is not its Dota roster.
       if(/\bdota(?:\s*2)?\b/i.test(m.question+' '+m.url)){
-        const teams=await this.source('https://api.opendota.com/api/teams','Statistiques publiques des équipes Dota 2','OpenDota',d=>d.filter((t:any)=>Number(t.last_match_time)>Date.now()/1000-30*86400&&(' '+nameKey(m.question)+' ').includes(' '+nameKey(t.name)+' ')&&nameKey(t.name).length>2).slice(0,2));sources.push(teams);
+        const teams=await source('https://api.opendota.com/api/teams','Statistiques publiques des équipes Dota 2','OpenDota',d=>d.filter((t:any)=>Number(t.last_match_time)>Date.now()/1000-30*86400&&(' '+nameKey(m.question)+' ').includes(' '+nameKey(t.name)+' ')&&nameKey(t.name).length>2).slice(0,2));sources.push(teams);
         if(teams.status==='VERIFIED')for(const team of JSON.parse(teams.text))if(Number.isInteger(team.team_id)){
           const url=`https://api.opendota.com/api/teams/${team.team_id}/matches`;
-          sources.push(await this.source(url,`Dix rencontres récentes de ${team.name} (Dota 2)`,'OpenDota',d=>({team:team.name,matches:d.slice(0,10),limitation:'Historical team matches, not a live score for this fixture.'})));
+          sources.push(await source(url,`Dix rencontres récentes de ${team.name} (Dota 2)`,'OpenDota',d=>({team:team.name,matches:d.slice(0,10),limitation:'Historical team matches, not a live score for this fixture.'})));
         }
       }
     }else{
@@ -241,7 +244,7 @@ export class Markets {
       const prefix=m.url.split('/event/')[1]?.split('-')[0],mapping:Record<string,string>={uwcl:'soccer/uefa.wchampions',bra2:'soccer/bra.2',bra:'soccer/bra.1',epl:'soccer/eng.1',lal:'soccer/esp.1',bund:'soccer/ger.1',bun:'soccer/ger.1',lig1:'soccer/fra.1',ita:'soccer/ita.1',mls:'soccer/usa.1',ucl:'soccer/uefa.champions',nba:'basketball/nba',wnba:'basketball/wnba',atp:'tennis/atp',wta:'tennis/wta'};
       const hint=mapping[prefix],leagues=hint?[hint]:m.category==='football'?['soccer/eng.1','soccer/esp.1','soccer/ger.1','soccer/fra.1','soccer/ita.1','soccer/bra.1','soccer/usa.1','soccer/uefa.champions']:m.category==='basketball'?['basketball/nba','basketball/wnba']:['tennis/atp','tennis/wta'];
       for(const league of leagues)for(const day of days){
-        const s=await this.source(`https://site.api.espn.com/apis/site/v2/sports/${league}/scoreboard?dates=${day}`,`Rencontres et informations publiques ${league}`,'ESPN',d=>(d.events||[]).filter((e:any)=>{const text=m.question+' '+(m.event_title||'')+' '+(m.fixture_context||'')+' '+m.description.slice(0,1500)+(hint?' '+m.url:''),competitors=e.competitions?.flatMap((c:any)=>c.competitors||[])||[];return competitors.filter((t:any)=>[t.team?.displayName,t.team?.shortDisplayName,hint?t.team?.abbreviation:null,t.athlete?.displayName,t.athlete?.fullName,t.roster?.displayName].some(n=>nameMatches(n,text))).length>=2&&Math.abs(Date.parse(e.date)-date)<18*3600000;}).map((e:any)=>sportsFacts(e)).slice(0,6));
+        const s=await source(`https://site.api.espn.com/apis/site/v2/sports/${league}/scoreboard?dates=${day}`,`Rencontres et informations publiques ${league}`,'ESPN',d=>(d.events||[]).filter((e:any)=>{const text=m.question+' '+(m.event_title||'')+' '+(m.fixture_context||'')+' '+m.description.slice(0,1500)+(hint?' '+m.url:''),competitors=e.competitions?.flatMap((c:any)=>c.competitors||[])||[];return competitors.filter((t:any)=>[t.team?.displayName,t.team?.shortDisplayName,hint?t.team?.abbreviation:null,t.athlete?.displayName,t.athlete?.fullName,t.roster?.displayName].some(n=>nameMatches(n,text))).length>=2&&Math.abs(Date.parse(e.date)-date)<18*3600000;}).map((e:any)=>sportsFacts(e)).slice(0,6));
         sources.push(s);
       }
     }
@@ -257,7 +260,7 @@ export class Markets {
           if(String(profile.id)!==String(id)||nameKey(profile.displayName)!==nameKey(name))continue;
           const ref=profile.statistics?.$ref;if(!ref)continue;const statsUrl=new URL(ref);statsUrl.protocol='https:';
           if(statsUrl.hostname!=='sports.core.api.espn.com'||!new RegExp('^/v2/sports/tennis/leagues/(atp|wta)/seasons/\\d{4}/types/\\d+/athletes/'+id+'/statistics(?:/\\d+)?$').test(statsUrl.pathname))continue;
-          const s=await this.source(statsUrl.href,`Profil et statistiques de saison ESPN : ${name}`,'ESPN',stats=>{const values=stats.splits?.categories?.flatMap((c:any)=>c.stats||[]).filter((v:any)=>typeof v.value==='number'&&Number.isFinite(v.value)).map((v:any)=>({name:v.name,value:v.value,displayValue:v.displayValue}));if(!values?.length)return null;return {player:{id,displayName:profile.displayName,hand:profile.hand?.displayValue,active:profile.active},season:statsUrl.pathname.match(/seasons\/(\d{4})/)?.[1],statistics_scope:'ESPN season statistics; lower-tour matches may be missing. Zeros do not establish an unbeaten record.',statistics:values,last_updated_at:null,fixture_verified_by_scoreboard:false,limitation:'Pre-match player context only, not live scores, confirmed lineup, complete Challenger results or a calibrated prediction.'};});
+          const s=await source(statsUrl.href,`Profil et statistiques de saison ESPN : ${name}`,'ESPN',stats=>{const values=stats.splits?.categories?.flatMap((c:any)=>c.stats||[]).filter((v:any)=>typeof v.value==='number'&&Number.isFinite(v.value)).map((v:any)=>({name:v.name,value:v.value,displayValue:v.displayValue}));if(!values?.length)return null;return {player:{id,displayName:profile.displayName,hand:profile.hand?.displayValue,active:profile.active},season:statsUrl.pathname.match(/seasons\/(\d{4})/)?.[1],statistics_scope:'ESPN season statistics; lower-tour matches may be missing. Zeros do not establish an unbeaten record.',statistics:values,last_updated_at:null,fixture_verified_by_scoreboard:false,limitation:'Pre-match player context only, not live scores, confirmed lineup, complete Challenger results or a calibrated prediction.'};});
           sources.push(s);
         }catch{/* Source demand is persisted; do not invent player history or bypass an unavailable feed. */}
       }

@@ -3,7 +3,7 @@ export async function snapshotUrl(path:string,stage:string){
  const request=new URL(path,'https://snapshot.local'),kind=request.pathname;
  let name:string;
  if(kind==='/api/state')name='state';else if(kind==='/api/events')name='events';else if(kind==='/api/meetings')name='meetings';
- else if(kind==='/api/meeting'||kind==='/api/document'){const id=request.searchParams.get('id');if(!id)throw Error('RÈfÈrence manquante');const hash=await crypto.subtle.digest('SHA-256',new TextEncoder().encode(id));name=(kind==='/api/meeting'?'meeting-':'document-')+Array.from(new Uint8Array(hash),b=>b.toString(16).padStart(2,'0')).join('');}
- else throw Error('Lecture de donnÈes non prise en charge');
+ else if(kind==='/api/meeting'||kind==='/api/document'){const id=request.searchParams.get('id');if(!id)throw Error('R√©f√©rence manquante');const hash=await crypto.subtle.digest('SHA-256',new TextEncoder().encode(id));name=(kind==='/api/meeting'?'meeting-':'document-')+Array.from(new Uint8Array(hash),b=>b.toString(16).padStart(2,'0')).join('');}
+ else throw Error('Lecture de donn√©es non prise en charge');
  if(!['full','shadow','pilot'].includes(stage))throw Error('Phase inconnue');const u=new URL(BASE+'/'+stage+'/'+name+'.json');u.searchParams.set('v',String(Math.floor(Date.now()/15000)));return u;
 }
