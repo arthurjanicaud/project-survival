@@ -3,6 +3,7 @@ import type {Policy} from './policy';
 export const RESEARCH_KINDS=['R4_SCAN','R4_PREPARE','R4_FORECAST','R4_SEARCH','R4_PREFLIGHT'];
 export function nextUtcReset(at=Date.now()){const d=new Date(at);return Date.UTC(d.getUTCFullYear(),d.getUTCMonth(),d.getUTCDate()+1);}
 export function researchPermit(repo:ReformRepository,job:any,p:Policy,at=Date.now()){
+  if(repo.get('runtime:backend')==='github-sqlite')return {allowed:true,mode:'NORMAL',seconds:0};
   const day=new Date(at).toISOString().slice(0,10),usage=repo.one('SELECT * FROM r4_usage WHERE day=?',day)||{reads:0,writes:0};
   const account=repo.get<any>('r4:account_usage'),fresh=account?.day===day&&at-Date.parse(account.at)>=-5000&&at-Date.parse(account.at)<900000;
   const pressure=Math.max(usage.reads/p.freeRowsReadDaily,usage.writes/p.freeRowsWrittenDaily,fresh?account.reads/p.freeRowsReadDaily:0,fresh?account.writes/p.freeRowsWrittenDaily:0);
