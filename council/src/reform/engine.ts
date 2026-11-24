@@ -74,11 +74,12 @@ export class ReformEngine {
       this.repo.event(run.id+':archived','ARCHIVED',run.stop_reason);this.repo.run("DELETE FROM transient_cache WHERE key LIKE 'r4:%'");
     });return {archived:true,stopped_at:run.stopped_at,financial_entries:0};
   }
-  link(meeting=''){const run=this.run();return this.env.PUBLIC_ORIGIN+'/?phase=4&stage='+run.stage.toLowerCase()+(meeting?'&meeting='+encodeURIComponent(meeting):'');}
-  notify(id:string,title:string,text:string,priority=3){this.repo.notify(id,title,text,this.link(),priority);}
+  link(meeting=''){const run=this.run();return this.env.PUBLIC_ORIGIN+'/?phase='+(this.env.PUBLIC_PHASE||'4')+'&stage='+(this.env.PUBLIC_STAGE||run.stage.toLowerCase())+(meeting?'&meeting='+encodeURIComponent(meeting):'');}
+  notify(id:string,title:string,text:string,priority=3){this.repo.notify(id,this.repo.state()?.mode==='test'?'TEST · '+title:title,text,this.link(),priority);}
   tick(){
     const run=this.run();if(!run||run.status==='READY'||run.status==='FINISHED')return;
     const bucket=Math.floor(Date.now()/(run.policy.scanMinutes*60000));
+    if(this.env.PUBLIC_STAGE==='smoke'&&this.repo.get('smoke:controlled')){if(run.status==='CLOSING'){this.repo.enqueue('smoke:settle:'+bucket,'R4_SETTLE',{});if(!this.repo.one("SELECT id FROM positions WHERE status='PENDING' LIMIT 1")){run.status='FINISHED';this.repo.set('reform_run',run);const s=this.repo.state()!;s.status='FINISHED';this.repo.save(s);}}return;}
     if(this.protocolCurrent()&&run.status==='RUNNING'&&Date.now()<Date.parse(this.repo.state()!.betting_deadline!))for(const category of CATEGORIES)this.repo.enqueue(`r4:scan:${bucket}:${category}`,'R4_SCAN',{category,bucket});
     if(this.repo.get('r4:last_tick_bucket')!==bucket){this.repo.set('r4:last_tick_bucket',bucket);this.repo.enqueue('r4:settle:'+bucket,'R4_SETTLE',{});this.repo.enqueue('r4:watch:'+bucket,'R4_WATCH',{});this.repo.run("UPDATE jobs SET status='SUPERSEDED',error='Replaced by current scan bucket' WHERE status='PENDING' AND kind='R4_SCAN' AND CAST(json_extract(payload,'$.bucket') AS INTEGER)<?",bucket);}
     if(Date.now()>=Date.parse(run.end_at!)){
@@ -192,7 +193,7 @@ export class ReformEngine {
       const fundedCapacity=this.run().stage==='SHADOW'||(['YES','NO'] as const).some(side=>D(this.budget(packet,side).maximum).gt(0));
       const candidate=fundedCapacity&&(this.run().stage==='SHADOW'||executableEdge)&&p!==null&&!value.essential_missing.length&&b&&Math.abs(p-b.probability)>.02&&(this.run().stage==='SHADOW'||!this.run().policy.requireQualification||this.methodQualified(packet.category,value.method_id));
       this.repo.run('UPDATE r4_packets SET status=? WHERE id=?',candidate?'CANDIDATE':'OBSERVING',packetId);
-      if(candidate){const deadline=decisionDeadline(packet.payload.market,this.repo.state()!.betting_deadline!),next=nextSlots(now(),this.repo.state()!.betting_deadline,1,this.run().policy.meetingHours)[0];
+      if(candidate&&this.env.PUBLIC_STAGE!=='smoke'){const deadline=decisionDeadline(packet.payload.market,this.repo.state()!.betting_deadline!),next=nextSlots(now(),this.repo.state()!.betting_deadline,1,this.run().policy.meetingHours)[0];
         if(!next||deadline<Date.parse(next)){const existing=this.repo.one("SELECT id FROM jobs WHERE kind='R4_SLOT' AND status IN ('PENDING','RUNNING') AND json_extract(payload,'$.urgent')=1 LIMIT 1");if(!existing)this.repo.enqueue('r4:urgent:'+Math.floor(Date.now()/300000),'R4_SLOT',{slot:now(),urgent:true},new Date(Date.now()+45000).toISOString());}}
     }
   }
@@ -239,7 +240,7 @@ export class ReformEngine {
   async slot(slot:string,urgent=false,kickoff=false){
     if(this.run().status!=='RUNNING')return;
     if(this.repo.one("SELECT id FROM r4_agendas WHERE status='RUNNING' LIMIT 1"))throw Error('R4_MEETING_BUSY');
-    if(!urgent&&Date.now()-Date.parse(slot)>300000){this.repo.event('r4:missed:'+slot,'SLOT_MISSED','Créneau ordinaire manqué : une réunion retardée n’est pas présentée comme ponctuelle.','SECRETARY',null,{slot});return;}
+    if(!urgent&&Date.now()-Date.parse(slot)>300000){this.repo.event('r4:missed:'+slot,'SLOT_MISSED','Créneau en retard : une réunion rattrapée n’est pas comptée comme ponctuelle.','SECRETARY',null,{slot,late_seconds:(Date.now()-Date.parse(slot))/1000});if(this.env.STORAGE_BACKEND!=='github-sqlite'||Date.now()-Date.parse(slot)>1800000)return;}
     const list=this.repo.rows("SELECT * FROM r4_packets WHERE status='CANDIDATE' AND json_extract(payload,'$.market.event_end_at')>? ORDER BY at",now()).map(r=>({...r,payload:JSON.parse(r.payload)}));
     if(this.improved()){const cursor=this.repo.get<number>('r4:agenda_cursor')||0;list.sort((a,b)=>((CATEGORIES.indexOf(a.category as Category)-cursor+5)%5)-((CATEGORIES.indexOf(b.category as Category)-cursor+5)%5)||a.at.localeCompare(b.at));}
     const agenda:any[]=[],used=new Set();for(const p of list){if(used.has(p.category))continue;const retry=this.repo.get<any>('r4:deferred:'+p.id);if(retry&&retry.policy_hash===this.run().policy_hash&&retry.facts===p.payload.facts)continue;

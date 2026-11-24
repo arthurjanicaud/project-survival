@@ -5,7 +5,7 @@ import {DatabaseSync} from 'node:sqlite';
 import {createHash} from 'node:crypto';
 import {storage} from './storage';
 import {ReformRepository} from '../reform/store';
-import {stages} from './persistence';
+import {legacyScopes as stages} from './scopes';
 import {BACKUP_TABLES} from '../reform/recovery';
 export function importArchive(input:string,destination:string){
  mkdirSync(destination,{recursive:true});const result:any={};

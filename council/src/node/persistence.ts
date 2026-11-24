@@ -4,7 +4,8 @@ import {readFileSync,writeFileSync,mkdirSync,existsSync,renameSync,rmSync} from 
 import {join,resolve} from 'node:path';
 import {execFileSync} from 'node:child_process';
 import type {DatabaseSync} from 'node:sqlite';
-export const stages=['full','shadow','pilot'] as const;
+import {scopes,newScopes} from './scopes';
+export const stages=scopes;
 export function key(){const v=process.env.COUNCIL_STATE_KEY||'';if(!/^[a-f0-9]{64}$/i.test(v))throw Error('COUNCIL_STATE_KEY_REQUIRES_32_RANDOM_BYTES_HEX');return Buffer.from(v,'hex');}
 export function seal(data:Buffer,scope:string,k=key()){const iv=randomBytes(12),c=createCipheriv('aes-256-gcm',k,iv);c.setAAD(Buffer.from('survival-state-v1:'+scope));const b=Buffer.concat([c.update(gzipSync(data)),c.final()]);return Buffer.concat([Buffer.from('SVA1'),iv,c.getAuthTag(),b]);}
 export function open(data:Buffer,scope:string,k=key()){if(data.subarray(0,4).toString()!=='SVA1')throw Error('INVALID_STATE_FORMAT');const d=createDecipheriv('aes-256-gcm',k,data.subarray(4,16));d.setAAD(Buffer.from('survival-state-v1:'+scope));d.setAuthTag(data.subarray(16,32));return gunzipSync(Buffer.concat([d.update(data.subarray(32)),d.final()]),{maxOutputLength:512*1024*1024});}
@@ -25,7 +26,7 @@ export async function github(path:string,method='GET',body?:any,bytes?:Buffer):P
 }
 export async function restore(dir:string,dataDir:string){
  const m=JSON.parse(readFileSync(join(dir,'manifest.json'),'utf8'));if(m.version!==3)throw Error('STATE_MANIFEST_VERSION');mkdirSync(dataDir,{recursive:true});
- for(const stage of stages){const entry=m.databases[stage];if(!entry)throw Error('MISSING_STAGE_BACKUP');const token=process.env.GH_TOKEN;if(!token)throw Error('GH_TOKEN_REQUIRED');
+ for(const stage of stages){const entry=m.databases[stage];if(!entry){if(process.env.COUNCIL_ALLOW_NEW_SCOPES==='true'&&newScopes.includes(stage as any))continue;throw Error('MISSING_STAGE_BACKUP');}const token=process.env.GH_TOKEN;if(!token)throw Error('GH_TOKEN_REQUIRED');
   const r=await fetch('https://api.github.com/repos/'+process.env.GITHUB_REPOSITORY+'/releases/assets/'+entry.asset_id,{signal:AbortSignal.timeout(120000),headers:{Authorization:'Bearer '+token,Accept:'application/octet-stream','X-GitHub-Api-Version':'2022-11-28'}});if(!r.ok)throw Error('BACKUP_DOWNLOAD_'+r.status);
   const b=Buffer.from(await r.arrayBuffer());if(sha(b)!==entry.sha256)throw Error('BACKUP_HASH_MISMATCH');const plain=open(b,stage);if(sha(plain)!==entry.plain_sha256||plain.subarray(0,16).toString()!=='SQLite format 3\0')throw Error('INVALID_SQLITE_BACKUP');const path=join(dataDir,stage+'.sqlite');if(existsSync(path+'-wal'))throw Error('RESTORE_REQUIRES_CLOSED_DATABASE');writeFileSync(path+'.tmp',plain);renameSync(path+'.tmp',path);
  }return m;
@@ -40,7 +41,7 @@ export async function persist(dir:string,databases:Record<string,{db:DatabaseSyn
   const b=seal(plain,stage);if(b.length>50*1024*1024)throw Error('BACKUP_SIZE_BUDGET_EXCEEDED');const name='checkpoint-'+stage+'-'+Date.now()+'-'+randomBytes(4).toString('hex')+'.enc';
   const asset=await github(release.upload_url.replace('{?name,label}','')+'?name='+name,'POST',undefined,b);manifest.databases[stage]={asset_id:asset.id,sha256:sha(b),plain_sha256:digest,bytes:b.length};
  }
- for(const [path,value] of Object.entries(publicFiles)){if(!/^data\/(full|shadow|pilot)\/(state|events|meetings|meeting-[a-f0-9]{64}|document-[a-f0-9]{64})\.json$/.test(path))throw Error('INVALID_PUBLIC_EXPORT_PATH');mkdirSync(dirnameOf(join(dir,path)),{recursive:true});writeFileSync(join(dir,path),JSON.stringify(value));}
+ for(const [path,value] of Object.entries(publicFiles)){if(!/^data\/(full|shadow|pilot|active|smoke)\/(state|events|meetings|report|meeting-[a-f0-9]{64}|document-[a-f0-9]{64})\.json$/.test(path))throw Error('INVALID_PUBLIC_EXPORT_PATH');mkdirSync(dirnameOf(join(dir,path)),{recursive:true});writeFileSync(join(dir,path),JSON.stringify(value));}
  writeFileSync(join(dir,'manifest.json'),JSON.stringify(manifest));git(dir,['add','data','manifest.json']);git(dir,['commit','-m','Checkpoint council state [skip ci]']);
  // Publishing the manifest is the commit point; non-fast-forward is fatal.
  git(dir,['push','origin','HEAD:refs/heads/'+branch]);

@@ -7,6 +7,15 @@ on:
         default: false
   workflow_dispatch:
     inputs:
+      action:
+        description: Explicit phase-5 administration; START never resets a fund
+        type: choice
+        options: [cycle, initialize, smoke, start]
+        default: cycle
+      confirm:
+        description: Required only for start (survival-005-active)
+        type: string
+        default: ''
       preflight:
         description: Check five real providers without starting a competition
         type: boolean
@@ -22,7 +31,7 @@ jobs:
   council:
     if: github.event_name == 'workflow_dispatch' || vars.COUNCIL_ACTIONS_ENABLED == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 25
     env:
       GH_TOKEN: ${{ github.token }}
       COUNCIL_STATE_KEY: ${{ secrets.COUNCIL_STATE_KEY }}
@@ -31,9 +40,13 @@ jobs:
       AZURE_OPENAI_API_KEY: ${{ secrets.AZURE_OPENAI_API_KEY }}
       AZURE_OPENAI_ENDPOINT: ${{ secrets.AZURE_OPENAI_ENDPOINT }}
       COUNCIL_AZURE_DEPLOYMENT: ${{ vars.COUNCIL_AZURE_DEPLOYMENT || 'gpt-6.1-sol-3' }}
-      COUNCIL_NO_LLM: ${{ inputs.preflight && 'true' || 'false' }}
+      COUNCIL_ACTION: ${{ inputs.action || 'cycle' }}
+      COUNCIL_ALLOW_NEW_SCOPES: ${{ inputs.action == 'initialize' && 'true' || 'false' }}
+      COUNCIL_START_CONFIRM: ${{ inputs.confirm }}
+      COUNCIL_PREFLIGHT_SCOPE: ${{ (inputs.action == 'initialize' || inputs.action == 'smoke' || inputs.action == 'start') && 'active' || 'pilot' }}
+      COUNCIL_NO_LLM: ${{ (inputs.preflight || inputs.action == 'initialize') && 'true' || 'false' }}
       COUNCIL_PREFLIGHT: ${{ inputs.preflight && 'true' || 'false' }}
-      COUNCIL_RUN_SECONDS: ${{ inputs.preflight && '420' || '240' }}
+      COUNCIL_RUN_SECONDS: ${{ inputs.action == 'smoke' && '1140' || inputs.action == 'start' && '720' || (inputs.preflight || inputs.action == 'initialize') && '420' || '240' }}
       COUNCIL_DATA_DIR: ${{ github.workspace }}/data/actions
       COUNCIL_STATE_DIR: ${{ github.workspace }}/data/state-checkout
       COUNCIL_PUBLISH: 'true'
@@ -54,7 +67,7 @@ jobs:
         run: node --import tsx src/node/state-cli.ts restore
         working-directory: council
       - name: Process jobs, publish durable checkpoints, relay notifications
-        run: python -u -m operations.actions_council
+        run: python -u -m operations.launch_council
       - uses: actions/upload-artifact@v4
         if: always()
         with:

@@ -6,7 +6,7 @@ import httpx
 from operations.council_collect import research,notifications
 ROOT=Path(__file__).resolve().parents[1]
 def needs_host(directory):
-    for stage in ['full','shadow','pilot']:
+    for stage in ['full','shadow','pilot','active','smoke']:
         path=Path(directory)/f'{stage}.sqlite'
         with sqlite3.connect(f'file:{path.as_posix()}?mode=ro',uri=True) as db:
             row=db.execute("SELECT value FROM meta WHERE key='reform_run'").fetchone()
