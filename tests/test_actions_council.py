@@ -25,3 +25,17 @@ def test_missing_state_is_an_error_not_a_new_empty_database(tmp_path):
     import pytest
     with pytest.raises(sqlite3.OperationalError):needs_host(tmp_path)
     assert not list(tmp_path.glob('*.sqlite'))
+
+
+def test_normal_host_shutdown_does_not_emit_a_false_notification_outage(capsys):
+    from operations.actions_council import service_pass
+    class Host:
+        done=False
+        def poll(self):return 0 if self.done else None
+    host=Host();calls=[]
+    def research():
+        calls.append('research');host.done=True
+    def notifications():raise AssertionError('Must not contact a closed host')
+    assert not service_pass(host,[research,notifications])
+    assert calls==['research']
+    assert capsys.readouterr().out==''

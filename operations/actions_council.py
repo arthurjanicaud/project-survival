@@ -17,6 +17,14 @@ def needs_host(directory):
             if db.execute("SELECT 1 FROM jobs WHERE kind='R4_PREFLIGHT' AND status IN ('PENDING','RUNNING') LIMIT 1").fetchone():return True
     return False
 
+def service_pass(process,services):
+    for service in services:
+        if process.poll() is not None:return False
+        try:service()
+        except Exception as e:
+            if process.poll() is None:print(json.dumps({'service':service.__name__,'error':str(e)}),flush=True)
+    return process.poll() is None
+
 def main():
     env={**os.environ,'COUNCIL_API_URL':'http://127.0.0.1:8790'}
     os.environ['COUNCIL_API_URL']=env['COUNCIL_API_URL']
@@ -40,9 +48,7 @@ def main():
             last_collect=0;last_ready=None
             while p.poll() is None:
                 if time.monotonic()-last_collect>60:
-                    for f in [research,notifications]:
-                        try:f()
-                        except Exception as e:print(json.dumps({'service':f.__name__,'error':str(e)}),flush=True)
+                    if not service_pass(p,[research,notifications]):break
                     try:
                         r=client.get(env['COUNCIL_API_URL']+'/admin/readiness',params={'stage':'pilot'})
                         if r.is_success:last_ready=r.json()
