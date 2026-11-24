@@ -24,6 +24,7 @@ on:
     - cron: '3-58/5 * * * *'
 permissions:
   contents: write
+  actions: write
 concurrency:
   group: council-sqlite-writer
   cancel-in-progress: false
@@ -68,6 +69,9 @@ jobs:
         working-directory: council
       - name: Process jobs, publish durable checkpoints, relay notifications
         run: python -u -m operations.launch_council
+      - name: Relay an active official week to the next serialized runner
+        if: always()
+        run: python -u -m operations.council_continue
       - uses: actions/upload-artifact@v4
         if: always()
         with:
