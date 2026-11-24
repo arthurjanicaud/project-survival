@@ -27,7 +27,7 @@ export const CONFIG = {
   transientCacheHours:12, quotaWarningBytes:250_000_000, version:'survival-phase3-v2.3',
 };
 export type Env = {
- STORAGE_BACKEND?: 'github-sqlite';
+ STORAGE_BACKEND?: 'github-sqlite'; PUBLIC_PHASE?:string; PUBLIC_STAGE?:string;
  CF_VERSION_METADATA?: {id:string;tag?:string;timestamp?:string};
   COUNCIL:DurableObjectNamespace; REFORM?:DurableObjectNamespace; REFORM_SHADOW_ID?:string; REFORM_PILOT_ID?:string; REFORM_FULL_ID?:string; REFORM_ACTIVE_MODE?:string; REFORM_TECHNICAL_FIX?:string; KNOWN_STORAGE_QUOTA_RESET?:string; EXPERIMENT_ID:string; TEST_EXPERIMENT_ID?:string; AZURE_DEPLOYMENT:string;
   AZURE_ENDPOINT?:string; AZURE_KEY?:string; ADMIN_TOKEN?:string; REFORM_IMPROVEMENTS?:string;

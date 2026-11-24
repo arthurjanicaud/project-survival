@@ -47,7 +47,7 @@ def research(force=False):
     health=httpx.get(api+'/api/health',timeout=30).json()
     test_response=httpx.get(api+'/api/health',params={'experiment':'test'},timeout=30)
     runs=[health]+([test_response.json()] if test_response.is_success else [])
-    for stage in ['shadow','pilot','full']:
+    for stage in ['shadow','pilot','full','active','smoke']:
         response=httpx.get(api+'/api/health',params={'phase':'4','stage':stage},timeout=30)
         if response.is_success:runs.append(response.json())
     active=[r for r in runs if r.get('state',{}).get('status')=='RUNNING']
@@ -63,7 +63,7 @@ def research(force=False):
     leagues=['basketball/nba','basketball/wnba','soccer/eng.1','soccer/esp.1','soccer/ger.1','soccer/fra.1','soccer/ita.1','soccer/bra.1','soccer/usa.1','soccer/uefa.champions','soccer/uefa.wchampions','soccer/bra.2','tennis/atp','tennis/wta']
     today=datetime.now(timezone.utc).date()
     full=force or any(not r.get('research_collector',{} ) or not (r.get('research_collector') or {}).get('full_at') or datetime.fromisoformat(r['research_collector']['full_at'].replace('Z','+00:00')).date()!=today for r in active)
-    urls=['https://api.opendota.com/api/teams'] if full or not all(recent(r) for r in active) else []
+    urls=[]  # Request OpenDota only when a current dossier needs it.
     for day in (range(-1,8) if full else [0,1] if not all(recent(r) for r in active) else []):
         stamp=(datetime.now(timezone.utc)+timedelta(days=day)).strftime('%Y%m%d')
         urls.extend(f'https://site.api.espn.com/apis/site/v2/sports/{league}/scoreboard?dates={stamp}' for league in leagues)

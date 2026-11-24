@@ -28,7 +28,7 @@ test('Node backend readiness needs five actual dossiers but never Cloudflare acc
 });
 
 test('Local host denies admin access and START; a restart never credits a fund',async()=>{
- const {host}=await import('../src/node/host');const dir=mkdtempSync(join(tmpdir(),'survival-host-'));process.env.COUNCIL_ADMIN_TOKEN='test-local-admin';process.env.COUNCIL_NO_LLM='true';const port=18970+Math.floor(Math.random()*100);
+ const {host}=await import('../src/node/host');const dir=mkdtempSync(join(tmpdir(),'survival-host-'));process.env.COUNCIL_ADMIN_TOKEN='test-local-admin';process.env.COUNCIL_NO_LLM='true';process.env.COUNCIL_ALLOW_NEW_SCOPES='true';const port=18970+Math.floor(Math.random()*100);
  try{for(let run=0;run<2;run++){const task=host({dataDir:dir,seconds:2,port,publish:false});let ready=false;for(let n=0;n<100;n++){try{const r=await fetch('http://127.0.0.1:'+port+'/api/health');if(r.ok){const b:any=await r.json();assert.equal(b.state.started_at,null);ready=true;break;}}catch{}await new Promise(r=>setTimeout(r,20));}assert.ok(ready);
   if(run===0){
    for(const [stage,url]of [['full','https://api.opendota.com/api/teams'],['pilot','https://site.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard?dates=20261124']]){const local=storage(join(dir,stage+'.sqlite'));if(stage==='full'){const row=local.db.prepare("SELECT value FROM meta WHERE key='reform_run'").get()!;const r=JSON.parse(String(row.value));r.status='FINISHED';local.db.prepare("UPDATE meta SET value=? WHERE key='reform_run'").run(JSON.stringify(r));}local.db.prepare('INSERT INTO meta VALUES(?,?)').run('source_demand:'+url,JSON.stringify({url,at:new Date().toISOString()}));local.db.close();}

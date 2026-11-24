@@ -2,7 +2,7 @@ import json,sqlite3
 from operations.actions_council import needs_host
 
 def fixture(tmp_path,status='READY'):
-    for stage in ['full','shadow','pilot']:
+    for stage in ['full','shadow','pilot','active','smoke']:
         with sqlite3.connect(tmp_path/f'{stage}.sqlite')as db:
             db.executescript('CREATE TABLE meta(key TEXT,value TEXT); CREATE TABLE jobs(kind TEXT,status TEXT);')
             db.execute('INSERT INTO meta VALUES(?,?)',('reform_run',json.dumps({'status':status})))
