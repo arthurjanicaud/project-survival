@@ -160,7 +160,7 @@ export class Markets {
         if(Number(r.headers.get('content-length')||0)>8_000_000){await r.body?.cancel();throw Error('PROVIDER_RESPONSE_TOO_LARGE');}
         const text=await r.text();if(text.length>8_000_000)throw Error('PROVIDER_RESPONSE_TOO_LARGE');
         const data=u.hostname==='blast.tv'?blastTimeline(text):JSON.parse(text);if(native){this.repo.putCache('research:'+url,{fetched_at:now(),data},900);this.repo.run('DELETE FROM meta WHERE key=?','source_demand:'+url);}if(cacheSeconds){this.repo.putCache(url,data,cacheSeconds);this.repo.putCache('observed:'+url,now(),cacheSeconds);}return data;
-      }finally{clearTimeout(timer);}
+      }catch(error){const pause=this.repo.get<any>('provider_cooldown:'+u.hostname);if(native&&(!pause?.until||Date.parse(pause.until)<=Date.now()))this.repo.requestSource(url);throw error;}finally{clearTimeout(timer);}
     }throw Error('PROVIDER_UNAVAILABLE');
   }
   async fx(){const r=await this.get('https://api.frankfurter.dev/v1/latest?base=EUR&symbols=USD',3600);if(!r.rates?.USD||D(r.rates.USD).lte(0)||(Date.now()-Date.parse(r.date))/86400000>5)throw Error('FX_UNAVAILABLE_OR_STALE');return {usd_per_eur:String(r.rates.USD),reference_date:r.date,source:'ECB reference via Frankfurter',method:'Frozen at explicit START; fictional 1 quote unit = 1 reference USD; no FX trading gain'};}
