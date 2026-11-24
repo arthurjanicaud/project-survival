@@ -53,6 +53,7 @@ export function quality(m:Market,sources:Source[],metar:any,at=Date.now(),policy
     warnings.push('La dispersion des modèles météo ne constitue pas une calibration stationnelle.');
   }else if(inProgress&&!independent.some(s=>/"state"\s*:\s*"(in|post)"/.test(s.text)&&at-Date.parse(s.fetched_at)<300000))missing.push('État sportif réellement en direct : score, temps et événement identifié');
   if(m.category==='esport'&&!/dota/i.test(m.question))missing.push('Connecteur spécifique à ce jeu esport non disponible');
+  if(independent.some(s=>s.provider==='BLAST'))warnings.push('BLAST : calendrier et resultats de series avant match ; ni classement OpenDota, ni roster confirme, ni donnees de carte en direct.');
   const playerProfiles=independent.filter(s=>s.text.includes('fixture_verified_by_scoreboard'));
   if(m.category==='tennis'&&playerProfiles.length){
     if(playerProfiles.length<2)missing.push('Identité et statistiques vérifiées nécessaires pour les deux joueurs');

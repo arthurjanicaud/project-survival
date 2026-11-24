@@ -1,9 +1,10 @@
+import {blastTimeline,blastFacts} from './blast';
 import {CONFIG,now,type Market,type Category,type Source,type Book} from './domain';
 import {Repository} from './repository';
 import {D} from './finance';
 
 const GAMMA='https://gamma-api.polymarket.com',CLOB='https://clob.polymarket.com',DATA='https://data-api.polymarket.com';
-const allowed=new Set(['gamma-api.polymarket.com','clob.polymarket.com','data-api.polymarket.com','api.frankfurter.dev','api.weather.gov','api.open-meteo.com','ensemble-api.open-meteo.com','site.api.espn.com','site.web.api.espn.com','sports.core.api.espn.com','api.opendota.com','aviationweather.gov']);
+const allowed=new Set(['blast.tv','gamma-api.polymarket.com','clob.polymarket.com','data-api.polymarket.com','api.frankfurter.dev','api.weather.gov','api.open-meteo.com','ensemble-api.open-meteo.com','site.api.espn.com','site.web.api.espn.com','sports.core.api.espn.com','api.opendota.com','aviationweather.gov']);
 const arr=(x:any):any[]=>Array.isArray(x)?x:typeof x==='string'?JSON.parse(x):[];
 const numeric=(v:any)=>v===undefined||v===null?null:D(String(v)).toFixed();
 const nameKey=(v:any)=>String(v||'').normalize('NFKD').replace(/\p{M}/gu,'').toLowerCase().replace(/[^\p{L}\p{N}]+/gu,' ').trim();
@@ -143,7 +144,7 @@ export class Markets {
     return {market_id:id,wire_market:Object.fromEntries(['id','version','closed','active','conditionId','condition_id','questionID','questionId','umaResolutionStatus','resolutionStatus','outcomes','outcomePrices'].map(k=>[k,raw[k]??null])),wire_resolutions:rows,final:finalResolution(raw,rows)};
   }
   async get(url:string,cacheSeconds=0,maximumAgeSeconds=900):Promise<any>{
-    const u=new URL(url);if(!allowed.has(u.hostname)||u.protocol!=='https:'||u.username||u.password)throw Error('PROVIDER_NOT_ALLOWED');
+    const u=new URL(url);if(u.hostname==='blast.tv'&&(u.pathname!=='/dota'||u.search))throw Error('PROVIDER_NOT_ALLOWED');if(!allowed.has(u.hostname)||u.protocol!=='https:'||u.username||u.password)throw Error('PROVIDER_NOT_ALLOWED');
     const research=this.repo.cache<any>('research:'+url),age=research?Date.now()-Date.parse(research.fetched_at):NaN;
     if(research&&Number.isFinite(age)&&age>=-5000&&age<Math.min(900,maximumAgeSeconds)*1000){if(age>=Math.min(600000,maximumAgeSeconds*750))this.repo.requestSource(url);return research.data;}
     const shared=['site.api.espn.com','site.web.api.espn.com','sports.core.api.espn.com','api.opendota.com'].includes(u.hostname),native=shared&&this.repo.get('runtime:backend')==='github-sqlite';
@@ -158,7 +159,7 @@ export class Markets {
         if(!r.ok){await r.body?.cancel();const retry=r.headers.get('retry-after'),parsed=Number(retry),wait=retry&&Number.isNaN(parsed)?Math.max(1,(Date.parse(retry)-Date.now())/1000):Math.max(1,Number.isFinite(parsed)?parsed:1);if(r.status===429)this.repo.set('provider_cooldown:'+u.hostname,{until:new Date(Date.now()+wait*1000).toISOString()});if((r.status===429||r.status>=500)&&a===0&&wait<=5){await new Promise(q=>setTimeout(q,(wait+.2)*1000));continue;}throw Error('PROVIDER_HTTP_'+r.status);}
         if(Number(r.headers.get('content-length')||0)>8_000_000){await r.body?.cancel();throw Error('PROVIDER_RESPONSE_TOO_LARGE');}
         const text=await r.text();if(text.length>8_000_000)throw Error('PROVIDER_RESPONSE_TOO_LARGE');
-        const data=JSON.parse(text);if(native){this.repo.putCache('research:'+url,{fetched_at:now(),data},900);this.repo.run('DELETE FROM meta WHERE key=?','source_demand:'+url);}if(cacheSeconds){this.repo.putCache(url,data,cacheSeconds);this.repo.putCache('observed:'+url,now(),cacheSeconds);}return data;
+        const data=u.hostname==='blast.tv'?blastTimeline(text):JSON.parse(text);if(native){this.repo.putCache('research:'+url,{fetched_at:now(),data},900);this.repo.run('DELETE FROM meta WHERE key=?','source_demand:'+url);}if(cacheSeconds){this.repo.putCache(url,data,cacheSeconds);this.repo.putCache('observed:'+url,now(),cacheSeconds);}return data;
       }finally{clearTimeout(timer);}
     }throw Error('PROVIDER_UNAVAILABLE');
   }
@@ -212,7 +213,7 @@ export class Markets {
     return m;
   }
   async source(url:string,title:string,provider:string,select:(data:any)=>any,maximumAgeSeconds=900):Promise<Source>{
-    try{const raw=await this.get(url,900,maximumAgeSeconds),selected=select(raw);if(!selected||Array.isArray(selected)&&!selected.length)throw Error('NO_MATCHING_DATA');const text=typeof selected==='string'?selected:JSON.stringify(selected),fetched_at=this.repo.cache<any>('research:'+url)?.fetched_at||this.repo.cache<string>('observed:'+url)||now();const source:Source={id:await hash({url,text,fetched_at}),url,title,text:text.slice(0,CONFIG.documentChars),fetched_at,provider,status:'VERIFIED'};this.repo.document(source);return source;}
+    try{const raw=await this.get(url,Math.min(900,maximumAgeSeconds),maximumAgeSeconds),selected=select(raw);if(!selected||Array.isArray(selected)&&!selected.length)throw Error('NO_MATCHING_DATA');const text=typeof selected==='string'?selected:JSON.stringify(selected),fetched_at=this.repo.cache<any>('research:'+url)?.fetched_at||this.repo.cache<string>('observed:'+url)||now();const source:Source={id:await hash({url,text,fetched_at}),url,title,text:text.slice(0,CONFIG.documentChars),fetched_at,provider,status:'VERIFIED'};this.repo.document(source);return source;}
     catch(e){const code=e instanceof Error?e.message.slice(0,180):'UNAVAILABLE';if(code!=='NO_MATCHING_DATA'){const previous=this.repo.get<any>('provider_error:'+provider);if(!previous||previous.code!==code||Date.now()-Date.parse(previous.at)>600000)this.repo.set('provider_error:'+provider,{at:now(),code});}return {id:await hash(url),url,title,text:'Source indisponible : '+code,fetched_at:now(),provider,status:'UNAVAILABLE'};}
   }
   async evidence(m:Market):Promise<Source[]>{
@@ -232,6 +233,9 @@ export class Markets {
     }else if(m.category==='esport'){
       // An organisation's CS/LoL roster is not its Dota roster.
       if(/\bdota(?:\s*2)?\b/i.test(m.question+' '+m.url)){
+        if(/blast[ -]*slam/i.test(m.question+' '+m.description)){
+          const organizer=await this.source('https://blast.tv/dota','Calendrier et resultats Dota 2 de BLAST, organisateur officiel','BLAST',d=>blastFacts(d,m),300);sources.push(organizer);if(organizer.status==='VERIFIED')return sources;
+        }
         const teams=await source('https://api.opendota.com/api/teams','Statistiques publiques des équipes Dota 2','OpenDota',d=>d.filter((t:any)=>Number(t.last_match_time)>Date.now()/1000-30*86400&&(' '+nameKey(m.question)+' ').includes(' '+nameKey(t.name)+' ')&&nameKey(t.name).length>2).slice(0,2));sources.push(teams);
         if(teams.status==='VERIFIED')for(const team of JSON.parse(teams.text))if(Number.isInteger(team.team_id)){
           const url=`https://api.opendota.com/api/teams/${team.team_id}/matches`;
