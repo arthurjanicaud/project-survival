@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {ReformRepository} from '../src/reform/store';
 import {ReformEngine} from '../src/reform/engine';
-import {copyPreflight,startOfficial,finalReport} from '../src/node/launch';
+import {copyPreflight,startOfficial,finalReport,beginSmoke} from '../src/node/launch';
 import {hash} from '../src/markets';
 import {policyFor} from '../src/reform/policy';
 import {repository,env} from './helpers';
@@ -24,4 +24,11 @@ test('Shared preflight retains original observation timestamps and rejects stale
 });
 test('Final report is saved only after official settlement, and never invents a payment',async()=>{
  const a=await runtime('survival-005-active');await finalReport(a);assert.equal(a.repo.get('report:final'),null);const run=a.engine.run();run.status='FINISHED';a.repo.set('reform_run',run);await finalReport(a);assert.ok(a.repo.get('report:final').financial_sha256);assert.equal(a.repo.cash(),'0');const stored=a.repo.get('report:final').generated_at;await finalReport(a);assert.equal(a.repo.get('report:final').generated_at,stored);
+});
+
+test('Isolated preflight transfers verified sporting identity and a retry never credits capital twice',async()=>{
+ const active=await runtime('survival-005-active'),smoke=await runtime('survival-005-smoke');preflight(active);
+ active.repo.putMarket({id:'m',category:'football',fixture_context:{league:'verified-league'}});copyPreflight(active,smoke);assert.equal(smoke.repo.market('m').category,'football');assert.equal(smoke.repo.market('m').fixture_context.league,'verified-league');
+ await beginSmoke(smoke,active);assert.equal(smoke.repo.cash(),'1200');const run=smoke.engine.run();run.code_version='previous-code';smoke.repo.set('reform_run',run);smoke.repo.set('smoke:report',{passed:false,azure_calls:16});
+ await beginSmoke(smoke,active);assert.equal(smoke.repo.cash(),'1200');assert.equal(smoke.repo.one('SELECT count(*) n FROM ledger').n,1);assert.equal(smoke.repo.get('smoke:attempts')[0].report.azure_calls,16);assert.equal(smoke.engine.run().code_version,'source-code');assert.equal(smoke.engine.run().policy.durationHours,168);
 });

@@ -54,7 +54,7 @@ export class ReformEngine {
     if(run.policy.requireQualification&&run.stage!=='SHADOW'&&(!qualification?.eligible||qualification.policy_hash!==run.policy_hash||qualification.code_version!==this.activeCode()))throw Error('QUALIFIED_OUT_OF_SAMPLE_SHADOW_REQUIRED');
     run.code_version=this.env.CF_VERSION_METADATA?.id||'local-test';
     const fx=await this.markets.fx();
-    this.repo.atomic(()=>{run.status='RUNNING';run.started_at=now();run.end_at=new Date(Date.now()+run.policy.durationHours*3600000).toISOString();run.evaluation_cutoff=new Date(Date.now()+24*3600000).toISOString();run.qualification=qualification;
+    this.repo.atomic(()=>{run.status='RUNNING';run.started_at=now();run.end_at=new Date(Date.parse(run.started_at)+run.policy.durationHours*3600000).toISOString();run.evaluation_cutoff=new Date(Date.now()+24*3600000).toISOString();run.qualification=qualification;
       const s=this.repo.state()!;s.status='RUNNING';s.started_at=run.started_at;s.end_at=run.end_at;s.betting_deadline=new Date(Date.parse(run.end_at)-run.policy.settlementMarginHours*3600000).toISOString();s.fx=fx;this.repo.save(s);this.repo.set('reform_run',run);
       if(run.stage!=='SHADOW')this.repo.run('INSERT INTO ledger VALUES(?,?,?,?,?)',run.id+':initial',now(),'INITIAL',D(s.initial_eur).mul(fx.usd_per_eur).toFixed(),run.id);
       this.repo.event(run.id+':start','START',run.stage==='SHADOW'?'L’observation sans mises commence. Chaque prévision sera évaluée après le résultat officiel.':`Le fonds ${run.stage} démarre avec ${s.initial_eur} € entièrement fictifs.`);
@@ -438,7 +438,7 @@ export class ReformEngine {
   }
   summary(){
     const run=this.run(),s=this.repo.state()!,fx=s.fx?.usd_per_eur||'1',positions=this.repo.rows('SELECT * FROM positions ORDER BY created_at DESC').map(x=>{const payload=JSON.parse(x.payload);return {...x,payload,cost_eur:D(x.cost).div(fx).toFixed(),fees_eur:D(payload.fees||'0').div(fx).toFixed(),profit_eur:payload.profit===undefined?null:D(payload.profit).div(fx).toFixed()};});
-    let calls=this.repo.cache<any[]>('r4:call_metrics');if(!calls){calls=this.repo.rows("SELECT actor,meeting_id,status,input_tokens,output_tokens,cached_tokens,cache_write_tokens,estimated_eur FROM calls WHERE id NOT LIKE '%:result'");this.repo.putCache('r4:call_metrics',calls,600);}
+    let calls=this.repo.cache<any[]>('r4:call_metrics');if(!calls){calls=this.repo.rows("SELECT actor,meeting_id,status,input_tokens,output_tokens,cached_tokens,cache_write_tokens,estimated_eur FROM calls WHERE id NOT LIKE '%:result'");this.repo.putCache('r4:call_metrics',calls,30);}
     let evaluation=this.repo.cache<any>('r4:evaluation');if(!evaluation){evaluation={score:score(this.scored()),chair:score(this.scored('CHAIR','AFTER')),qualification:this.qualification(),at:now()};this.repo.putCache('r4:evaluation',evaluation,600);}const initialScore=evaluation.score,chair=evaluation.chair;
     const meetings=this.repo.rows('SELECT * FROM r4_agendas ORDER BY at DESC LIMIT 40').map(x=>({...x,payload:JSON.parse(x.payload)}));
     const expected=run.started_at?nextSlots(run.started_at,run.end_at,100,run.policy.meetingHours).filter(t=>Date.parse(t)<=Date.now()):[],ordinary=this.repo.rows("SELECT slot,status,payload,at FROM r4_agendas WHERE json_extract(payload,'$.urgent') IS NOT 1 AND json_extract(payload,'$.kickoff') IS NOT 1");
