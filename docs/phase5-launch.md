@@ -17,3 +17,5 @@ Le tableau de bord officiel est `https://project-survival.pages.dev/?phase=5`. L
 À l'échéance, aucune nouvelle décision d'investissement n'est permise. Un règlement réellement publié est nécessaire pour payer une position : une résolution en retard reste explicitement en attente, sans cours ni remboursement inventé. Le rapport JSON final est publié seulement après règlement de toutes les positions.
 
 Les crédits Azure sont réellement consommés pendant le test. Les jetons et appels sont enregistrés ; un test synthétique local ne remplace pas ce contrôle réel. Aucune transaction avec de l'argent réel n'est disponible dans ce moteur.
+
+Après START, chaque runner déclenche le suivant tant que le fonds officiel est RUNNING ou CLOSING. La sérialisation empêche les écritures concurrentes ; le cron reste un secours indépendant de cette chaîne dans GitHub. Les fonds READY, terminés et les tests ne déclenchent pas cette chaîne. Une indisponibilité globale de GitHub reste une limite externe.

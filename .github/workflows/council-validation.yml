@@ -5,6 +5,7 @@ on:
     - cron: '7,37 * * * *'
 permissions:
   contents: write
+  actions: write
 concurrency:
   group: council-readiness-validation
   cancel-in-progress: false
