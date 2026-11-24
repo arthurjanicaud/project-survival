@@ -1,1 +1,1 @@
-{"events":[],"scope":"latest 500 events; complete meeting replays and encrypted archive retain history"}
+{"events":[{"seq":1,"id":"survival-005-active:start","at":"2026-11-24T13:27:47.601Z","meeting_id":null,"kind":"START","actor":"SECRETARY","text":"Le fonds FULL démarre avec 1000 € entièrement fictifs.","details":{}}],"scope":"latest 500 events; complete meeting replays and encrypted archive retain history"}
