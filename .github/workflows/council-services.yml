@@ -10,6 +10,7 @@ concurrency:
   cancel-in-progress: false
 jobs:
   services:
+    if: vars.COUNCIL_ACTIONS_ENABLED != 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 8
     env:

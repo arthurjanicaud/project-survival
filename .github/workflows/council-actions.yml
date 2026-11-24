@@ -1,0 +1,52 @@
+name: Council on GitHub (durable SQLite)
+on:
+  workflow_dispatch:
+    inputs:
+      preflight:
+        description: Check five real providers without starting a competition
+        type: boolean
+        default: false
+  schedule:
+    - cron: '3-58/5 * * * *'
+permissions:
+  contents: write
+concurrency:
+  group: council-sqlite-writer
+  cancel-in-progress: false
+jobs:
+  council:
+    if: github.event_name == 'workflow_dispatch' || vars.COUNCIL_ACTIONS_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      GH_TOKEN: ${{ github.token }}
+      COUNCIL_STATE_KEY: ${{ secrets.COUNCIL_STATE_KEY }}
+      COUNCIL_ADMIN_TOKEN: ${{ secrets.COUNCIL_ADMIN_TOKEN }}
+      COUNCIL_NTFY_TOPIC: ${{ secrets.COUNCIL_NTFY_TOPIC }}
+      AZURE_OPENAI_API_KEY: ${{ secrets.AZURE_OPENAI_API_KEY }}
+      AZURE_OPENAI_ENDPOINT: ${{ secrets.AZURE_OPENAI_ENDPOINT }}
+      COUNCIL_AZURE_DEPLOYMENT: ${{ vars.COUNCIL_AZURE_DEPLOYMENT || 'gpt-6.1-sol-3' }}
+      COUNCIL_NO_LLM: ${{ inputs.preflight && 'true' || 'false' }}
+      COUNCIL_PREFLIGHT: ${{ inputs.preflight && 'true' || 'false' }}
+      COUNCIL_RUN_SECONDS: '240'
+      COUNCIL_DATA_DIR: ${{ github.workspace }}/data/actions
+      COUNCIL_STATE_DIR: ${{ github.workspace }}/data/state-checkout
+      COUNCIL_PUBLISH: 'true'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: council/package-lock.json
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: npm ci
+        working-directory: council
+      - run: pip install httpx python-dotenv
+      - name: Restore authenticated encrypted state (no empty fallback)
+        run: node --import tsx src/node/state-cli.ts restore
+        working-directory: council
+      - name: Process jobs, publish durable checkpoints, relay notifications
+        run: python -u -m operations.actions_council

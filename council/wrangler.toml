@@ -19,7 +19,7 @@ ALLOW_FIXTURES = "false"
 NTFY_DELIVERY = "github-relay"
 
 [triggers]
-crons = ["* * * * *"]
+crons = [] # Engine migrated to GitHub Actions; archived Worker is read-only.
 
 [[durable_objects.bindings]]
 name = "COUNCIL"
