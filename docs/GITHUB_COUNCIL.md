@@ -58,3 +58,5 @@ Les anciennes archives gzip NDJSON et leurs manifestes restent disponibles local
 Les réveils ordinaires sans fonds actif ni précontrôle à reprendre se terminent immédiatement après la restauration. Le workflow de validation réutilise le même moteur, sans Azure et sans START, deux fois par heure jusqu’à la borne `COUNCIL_VALIDATION_UNTIL` ; il partage le verrou du moteur.
 
 Sur Node, un flux sportif public absent est récupéré directement par le moteur puis mutualisé avec son véritable horodatage. Le moteur respecte les délais/cooldowns fournisseurs ; une erreur ne devient pas une donnée inventée. L'ancien Worker conserve son relais de collecte, sans changement de comportement pour les archives.
+
+Le précontrôle tennis privilégie les rencontres à venir afin de tester le complément avant-match ; les rencontres en cours exigent toujours un véritable score en direct. Ce choix de diagnostic ne force aucune décision du spécialiste.
