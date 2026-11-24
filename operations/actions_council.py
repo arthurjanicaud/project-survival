@@ -20,6 +20,8 @@ def needs_host(directory):
 def main():
     env={**os.environ,'COUNCIL_API_URL':'http://127.0.0.1:8790'}
     os.environ['COUNCIL_API_URL']=env['COUNCIL_API_URL']
+    # Documentation/frontend commits must not freeze a running council.
+    env['COUNCIL_CODE_VERSION']=subprocess.check_output(['git','rev-parse','HEAD:council/src'],cwd=ROOT,text=True).strip()
     if env.get('COUNCIL_PREFLIGHT')!='true' and not needs_host(env['COUNCIL_DATA_DIR']):
         print(json.dumps({'council':'idle_no_active_fund','no_start':True,'azure_calls':0}),flush=True);return
     p=subprocess.Popen(['node','--import','tsx','src/node/host.ts'],cwd=ROOT/'council',env=env)

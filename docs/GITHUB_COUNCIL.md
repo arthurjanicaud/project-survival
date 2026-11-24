@@ -60,3 +60,9 @@ Les réveils ordinaires sans fonds actif ni précontrôle à reprendre se termin
 Sur Node, un flux sportif public absent est récupéré directement par le moteur puis mutualisé avec son véritable horodatage. Le moteur respecte les délais/cooldowns fournisseurs ; une erreur ne devient pas une donnée inventée. L'ancien Worker conserve son relais de collecte, sans changement de comportement pour les archives.
 
 Le précontrôle tennis privilégie les rencontres à venir afin de tester le complément avant-match ; les rencontres en cours exigent toujours un véritable score en direct. Ce choix de diagnostic ne force aucune décision du spécialiste.
+
+## Configuration de publication vérifiée lors de la bascule
+
+La branche de données `survival-state` est exclue des previews Cloudflare Pages (`preview_deployment_setting=custom`, `preview_branch_includes=["*"]`, `preview_branch_excludes=["survival-state"]`). Une sauvegarde ou une intervention ne doit pas reconstruire le site ; seule une modification du frontend nécessite une nouvelle version du dashboard. La production reste sur `main`. Les cron du conseil et de l'ancien watchdog Cloudflare ont été retirés ; les Workers restent accessibles pour lire les anciennes archives.
+
+La version figée du moteur Node est fondée sur l'arbre Git `council/src` et le déploiement Azure. Une modification du dashboard ou de la documentation ne suspend donc pas une compétition ; une modification du moteur reste détectée et suspend les nouveaux avis, comme prévu par le protocole.
